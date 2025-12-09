@@ -1,0 +1,105 @@
+spring:
+  application:
+    name: platform-gateway
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+  cloud:
+    nacos:
+      discovery:
+        server-addr: localhost:8848
+        username: nacos
+        password: nacos
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: test_route
+              uri: https://httpbin.org
+              predicates:
+                - Path=/api/test/**
+              filters:
+                - StripPrefix=2
+                - name: CircuitBreaker
+                  args:
+                    name: userCircuitBreaker
+                    fallbackUri: forward:/fallback
+            - id: no_found
+              uri: http://localhost:9999
+              predicates:
+                - Path=/api/no/**
+              filters:
+                - StripPrefix=2
+                - name: CircuitBreaker
+                  args:
+                    name: userCircuitBreaker
+                    fallbackUri: forward:/fallback
+          discovery:
+            locator:
+              lower-case-service-id: true
+              enabled: true
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      userCircuitBreaker:
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+  ratelimiter:
+    instances:
+      userRateLimiter:
+        limitForPeriod: 5
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+  timelimiter:
+    instances:
+      userCircuitBreaker:
+        timeout-duration: 1ms
+        cancel-running-future: true
+
+server:
+  port: 8080
+  tomcat:
+    threads:
+      max: 300
+      min-spare: 50
+    max-connections: 15000
+    accept-count: 200
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+    baggage:
+      correlation:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,metrics,prometheus,gateway"
+  endpoint:
+    health:
+      show-details: always
+  zipkin:
+    tracing:
+      connect-timeout: 1s
+      endpoint: http://localhost:9411/api/v2/spans
+      encoding: json
+  metrics:
+    tags:
+      application: ${spring.application.name}
+springdoc:
+  swagger-ui:
+    enabled: true
+    path: "/swagger-ui.html"
+    urls:
+      - name: gateway
+        url: /v3/api-docs
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+
