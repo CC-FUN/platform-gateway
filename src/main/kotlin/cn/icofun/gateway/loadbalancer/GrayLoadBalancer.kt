@@ -1,21 +1,15 @@
 package cn.icofun.gateway.loadbalancer
 
-import org.apache.commons.logging.LogFactory
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.cloud.client.ServiceInstance
-import org.springframework.cloud.client.loadbalancer.DefaultResponse
-import org.springframework.cloud.client.loadbalancer.EmptyResponse
-import org.springframework.cloud.client.loadbalancer.Request
-import org.springframework.cloud.client.loadbalancer.RequestDataContext
-import org.springframework.cloud.client.loadbalancer.Response
+import org.springframework.cloud.client.loadbalancer.*
 import org.springframework.cloud.loadbalancer.core.NoopServiceInstanceListSupplier
 import org.springframework.cloud.loadbalancer.core.ReactorServiceInstanceLoadBalancer
 import org.springframework.cloud.loadbalancer.core.ServiceInstanceListSupplier
 import org.springframework.http.HttpHeaders
 import reactor.core.publisher.Mono
 import java.util.concurrent.ThreadLocalRandom
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.math.abs
 
 /**
  * 灰度发布负载均衡器
@@ -26,10 +20,11 @@ import kotlin.math.abs
  */
 class GrayLoadBalancer(
     private val serviceInstanceListSupplierProvider: ObjectProvider<ServiceInstanceListSupplier>,
-    private val serviceId: String
+    private val serviceId: String,
+    private val healthCheckManager: HealthCheckManager
 ) : ReactorServiceInstanceLoadBalancer {
-    private val log = LogFactory.getLog(this::class.java)
-    private val position = AtomicInteger(ThreadLocalRandom.current().nextInt(1000))
+
+    private val logger = LoggerFactory.getLogger(this::class.java)
     private val GRAY_HEADER = "Gray-Version" // 定义灰度请求头
 
     override fun choose(request: Request<*>?): Mono<Response<ServiceInstance>> {
@@ -43,34 +38,80 @@ class GrayLoadBalancer(
         instances: List<ServiceInstance>,
         request: Request<*>?
     ): Response<ServiceInstance> {
-        if (instances.isEmpty()) {
-            log.warn("No instances available for service: $serviceId")
-            return EmptyResponse()
+        if (instances.isEmpty()) return EmptyResponse()
+
+        // 1. 基础健康检查过滤 (结合本地黑名单)
+        val healthyInstances = instances.filter {
+            healthCheckManager.isHealthy("${it.host}:${it.port}")
         }
 
+        // 1. 基础健康检查过滤
+        val availableInstances = healthyInstances.ifEmpty { instances }
+
+        // 2. 粘性灰度特征提取 (Header)
         val clientRequest = request?.context as? RequestDataContext
         val headers = clientRequest?.clientRequest?.headers ?: HttpHeaders.EMPTY
         val grayVersion = headers.getFirst(GRAY_HEADER)
 
-        val targetInstances = if (!grayVersion.isNullOrBlank()) {
-            val filtered = instances.filter {
+        // 3. 版本筛选：如果 Header 指定了版本，只在对应版本里挑
+        val candidates = if (!grayVersion.isNullOrBlank()) {
+            val matched = availableInstances.filter {
                 grayVersion.equals(it.metadata["version"], ignoreCase = true)
             }
-            if (filtered.isNotEmpty()) {
-                log.info("🎯 [GrayRouting] 命中灰度规则: $serviceId -> version=$grayVersion, 可用实例数: ${filtered.size}")
-                filtered
-            } else {
-                log.warn("⚠️ [GrayRouting] 指定版本 $grayVersion 无实例，降级为随机路由")
-                instances
-            }
+            if (matched.isNotEmpty()) matched else availableInstances
         } else {
-            instances
+            availableInstances
         }
 
-        val pos = abs(position.incrementAndGet())
-        val instance = targetInstances[pos % targetInstances.size]
-
-        return DefaultResponse(instance)
+        // 4. 执行加权随机算法
+        return DefaultResponse(selectByWeight(candidates))
     }
 
+    private fun selectByWeight(instances: List<ServiceInstance>): ServiceInstance {
+        if (instances.size == 1) return instances[0]
+
+        // 计算总权重 (默认权重设为 100)
+        val totalWeight = instances.sumOf { instance ->
+            val weight = when (val w = instance.metadata["weight"]) {
+                is Number -> {
+                    logger.debug("[GrayLB] Instance ${instance.host}:${instance.port} weight is Number: $w")
+                    w.toInt()
+                }
+                is String -> {
+                    val parsed = w.toIntOrNull() ?: 100
+                    logger.debug("[GrayLB] Instance ${instance.host}:${instance.port} weight is String: '$w' -> $parsed")
+                    parsed
+                }
+                else -> {
+                    logger.warn("[GrayLB] Instance ${instance.host}:${instance.port} weight is unknown type: ${w?.javaClass?.name}, using default 100")
+                    100
+                }
+            }
+            weight
+        }
+
+        // 如果权重设置异常或均为0，降级为完全随机
+        if (totalWeight <= 0) {
+            logger.warn("[GrayLB] Total weight is $totalWeight, using random selection")
+            return instances[ThreadLocalRandom.current().nextInt(instances.size)]
+        }
+        
+        logger.debug("[GrayLB] Total weight: $totalWeight, instance count: ${instances.size}")
+        
+        // 核心：加权随机算法
+        var randomPos = ThreadLocalRandom.current().nextInt(totalWeight)
+        for (instance in instances) {
+            val weight = when (val w = instance.metadata["weight"]) {
+                is Number -> w.toInt()
+                is String -> w.toIntOrNull() ?: 100
+                else -> 100
+            }
+            randomPos -= weight
+            if (randomPos < 0) {
+                logger.debug("[GrayLB] Selected instance: ${instance.host}:${instance.port}")
+                return instance
+            }
+        }
+        return instances[0]
+    }
 }

@@ -7,6 +7,8 @@ import cn.icofun.gateway.exception.BusinessException
 import cn.icofun.gateway.service.GatewayConfigService
 import cn.icofun.gateway.utils.Sha256Utils
 import org.slf4j.LoggerFactory
+import org.springframework.cloud.gateway.route.Route
+import org.springframework.cloud.gateway.support.ServerWebExchangeUtils
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
@@ -22,7 +24,6 @@ class SignaturePlugin(
     private val redisTemplate: ReactiveStringRedisTemplate,
     private val configService: GatewayConfigService
 ) : GatewayPlugin {
-    private val logger = LoggerFactory.getLogger(this::class.java)
     private val pathMatcher = AntPathMatcher()
 
     companion object {
@@ -48,117 +49,132 @@ class SignaturePlugin(
     override fun shouldSkip(context: GatewayContext): Boolean = false
 
     override fun execute(context: GatewayContext, chain: PluginChain): Mono<Void> {
-        val request = context.exchange.request
+        val exchange = context.exchange
+        val request = exchange.request
         val path = request.path.value()
 
-        return configService.getSignWhitelist().flatMap { redisList ->
-            val finalWhiteList = defaultWhiteList + redisList
-            val isWhite = finalWhiteList.any { pathMatcher.match(it, path) }
-
-            if (isWhite) {
-                return@flatMap chain.execute(context)
-            }
-
-            val headers = request.headers
-            val authHeader = headers.getFirst(HttpHeaders.AUTHORIZATION)
-            if (!authHeader.isNullOrBlank() && authHeader.startsWith("Bearer ")) {
-                return@flatMap chain.execute(context)
-            }
-
-
-            val appInfo = headers.getFirst("X-App-Info")
-            val sign = headers.getFirst("X-Sign")
-            val timestampStr = headers.getFirst("X-Timestamp")
-            val nonce = headers.getFirst("X-Nonce")
-
-            if (appInfo.isNullOrBlank() || sign.isNullOrBlank() || timestampStr.isNullOrBlank() || nonce.isNullOrBlank()) {
-                return@flatMap Mono.error(BusinessException(40001, "签名参数缺失", HttpStatus.BAD_REQUEST.value()))
-            }
-
-            val timestamp = try {
-                timestampStr.toLong()
-            } catch (_: Exception) {
-                return@flatMap Mono.error(BusinessException(40003, "时间戳格式错误", HttpStatus.BAD_REQUEST.value()))
-            }
-
-            val now = System.currentTimeMillis()
-            if (abs(now - timestamp) > SIGN_TIMEOUT_MS) {
-                return@flatMap Mono.error(BusinessException(40004, "请求已过期", HttpStatus.FORBIDDEN.value()))
-            }
-
-            val appInfoParts = appInfo.split(".")
-            if (appInfoParts.size <3) {
-                return@flatMap Mono.error(BusinessException(40002, "app_info格式错误", HttpStatus.FORBIDDEN.value()))
-            }
-
-            val appId = appInfoParts.last() // 提取出真实的 appId 用于查库
-
-            configService.getAppSecret(appId)
-                .switchIfEmpty(
-                    Mono.error(BusinessException(40002, "非法的 AppId", HttpStatus.FORBIDDEN.value()))
-                ).flatMap { appSecret ->
-                    val sortedParams = TreeMap<String, String>()
-                    request.queryParams.forEach { (k, v) ->
-                        if (v.isNotEmpty()) {
-                            sortedParams[k] = v[0]
-                        }
-                    }
-
-                    sortedParams.remove("X-App-Secret")
-                    sortedParams.remove("X-Sign")
-                    sortedParams.remove("X-Timestamp")
-                    sortedParams.remove("X-Nonce")
-
-                    val sb = StringBuilder()
-                    sb.append("app_info=").append(appInfo).append("&")
-                    sb.append("nonce=").append(nonce).append("&")
-                    sb.append("timestamp=").append(timestampStr).append("&")
-
-                    for ((key, value) in sortedParams) {
-                        sb.append(key).append("=").append(value).append("&")
-                    }
-
-                    val cachedBody = context.getAttribute<String>("cachedRequestBody")
-                    if (!cachedBody.isNullOrBlank()) {
-                        sb.append("body=").append(cachedBody).append("&")
-                    }
-
-                    sb.append("secret=").append(appSecret)
-
-                    val calculatedSign = Sha256Utils.sha256AsHex(sb.toString().toByteArray())
-
-                    if (logger.isDebugEnabled){
-                        logger.debug("Signature check: AppInfo=$appInfo, ServerSign=$calculatedSign, ClientSign=$sign")
-                    }
-
-                    if (!calculatedSign.equals(sign, ignoreCase = true)) {
-                        return@flatMap Mono.error(
-                            BusinessException(
-                                40005,
-                                "签名校验失败",
-                                HttpStatus.FORBIDDEN.value()
-                            )
-                        )
-                    }
-
-                    val nonceKey = NONCE_KEY_PREFIX + nonce
-                    redisTemplate.opsForValue()
-                        .setIfAbsent(nonceKey, "1", Duration.ofMillis(SIGN_TIMEOUT_MS))
-                        .flatMap { success ->
-                            if (success) {
-                                context.setAttribute(AUTH_SUCCESS_KEY, true)
-                                chain.execute(context)
-                            } else {
-                                Mono.error(
-                                    BusinessException(
-                                        40006,
-                                        "请求重复(Replay Attack)",
-                                        HttpStatus.FORBIDDEN.value()
-                                    )
-                                )
-                            }
-                        }
-                }
+        val route = exchange.getAttribute<Route>(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR)
+        val metadata = route?.metadata ?: emptyMap()
+        val signEnabled = when (val value = metadata["sign_enabled"]) {
+            is Boolean -> value.toString()
+            is String -> value
+            else -> null
         }
+
+        if (signEnabled == "false") {
+            return chain.execute(context)
+        }
+
+        return shouldCheck(path, signEnabled).flatMap { needCheck ->
+            if (!needCheck) {
+                return@flatMap chain.execute(context)
+            }
+
+            performSignatureCheck(context, chain)
+        }
+    }
+
+    private fun shouldCheck(path: String, routeConfig: String?): Mono<Boolean> {
+        if (routeConfig == "true") return Mono.just(true)
+
+        return configService.getSignWhitelistFromCache().map { redisLis ->
+            val finalWhiteList = defaultWhiteList + redisLis
+            val isWhite = finalWhiteList.any { pathMatcher.match(it, path) }
+            !isWhite
+        }
+    }
+
+    private fun performSignatureCheck(context: GatewayContext, chain: PluginChain): Mono<Void> {
+        val request = context.exchange.request
+        val headers = request.headers
+
+        if (!headers.getFirst(HttpHeaders.AUTHORIZATION).isNullOrBlank()) {
+            return chain.execute(context)
+        }
+
+        val appInfo = headers.getFirst("X-App-Info")
+        val sign = headers.getFirst("X-Sign")
+        val timestampStr = headers.getFirst("X-Timestamp")
+        val nonce = headers.getFirst("X-Nonce")
+
+        if (appInfo.isNullOrBlank() || sign.isNullOrBlank() || timestampStr.isNullOrBlank() || nonce.isNullOrBlank()) {
+            return Mono.error(BusinessException(40001, "sign.param.missing", HttpStatus.BAD_REQUEST.value()))
+        }
+
+        val timestamp = try {
+            timestampStr.toLong()
+        } catch (_: Exception) {
+            return Mono.error(BusinessException(40003, "sign.timestamp.invalid", HttpStatus.BAD_REQUEST.value()))
+        }
+
+        val now = System.currentTimeMillis()
+        if (abs(now - timestamp) > SIGN_TIMEOUT_MS) {
+            return Mono.error(BusinessException(40004, "sign.expired", HttpStatus.FORBIDDEN.value()))
+        }
+
+        val appInfoParts = appInfo.split(".")
+        if (appInfoParts.size < 3) {
+            return Mono.error(BusinessException(40002, "sign.app_info.invalid", HttpStatus.FORBIDDEN.value()))
+        }
+        val appId = appInfoParts.last()
+
+        return configService.getAppSecret(appId)
+            .switchIfEmpty(
+                Mono.error(BusinessException(40002, "sign.appid.invalid", HttpStatus.FORBIDDEN.value()))
+            ).flatMap { appSecret ->
+                verifySignature(context, chain, appInfo, sign, timestampStr, nonce, appSecret)
+            }
+    }
+
+    private fun verifySignature(
+        context: GatewayContext, chain: PluginChain,
+        appInfo: String, sign: String, timestamp: String, nonce: String, secret: String
+    ): Mono<Void> {
+        val request = context.exchange.request
+        val sortedParams = TreeMap<String, String>()
+        request.queryParams.forEach { (k, v) ->
+            if (v.isNotEmpty()) {
+                sortedParams[k] = v[0]
+            }
+        }
+
+        val sb = StringBuilder()
+        sb.append("app_info=").append(appInfo).append("&")
+        sb.append("nonce=").append(nonce).append("&")
+        sb.append("timestamp=").append(timestamp).append("&")
+        for ((key, value) in sortedParams) {
+            sb.append(key).append("=").append(value).append("&")
+        }
+
+        sb.append("secret=").append(secret)
+
+        val cachedBody = context.getAttribute<String>("cachedRequestBodyString")
+        if (!cachedBody.isNullOrBlank()) {
+            sb.append("body=").append(cachedBody).append("&")
+        }
+
+
+        val calculated = Sha256Utils.sha256AsHex(sb.toString().toByteArray())
+        if (!calculated.equals(sign, ignoreCase = true)) {
+            return Mono.error(BusinessException(40005, "sign.check.failed", HttpStatus.FORBIDDEN.value()))
+        }
+
+        val nonceKey = NONCE_KEY_PREFIX + nonce
+        return redisTemplate.opsForValue()
+            .setIfAbsent(nonceKey, "1", Duration.ofMillis(SIGN_TIMEOUT_MS))
+            .flatMap { success ->
+                if (success) {
+                    context.setAttribute(AUTH_SUCCESS_KEY, true)
+                    chain.execute(context)
+                } else {
+                    Mono.error(
+                        BusinessException(
+                            40006,
+                            "sign.replay.attack",
+                            HttpStatus.FORBIDDEN.value()
+                        )
+                    )
+                }
+            }
     }
 }

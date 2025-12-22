@@ -15,6 +15,8 @@ class ObjectMapperConfig {
         return ObjectMapper().apply {
             registerModule(KotlinModule.Builder().build())
 
+            findAndRegisterModules()
+
             configure(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS, false)
         }
     }

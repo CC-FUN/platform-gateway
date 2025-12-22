@@ -25,8 +25,14 @@ class GatewayPluginRunner(
         val context = GatewayContext(exchange)
 
         return PluginChain(sortedPlugins).execute(context)
-            .then(chain.filter(exchange))
+            .then(Mono.defer {
+                if (!exchange.response.isCommitted) {
+                    chain.filter(exchange)
+                } else {
+                    Mono.empty()
+                }
+            })
     }
 
-    override fun getOrder(): Int = Ordered.HIGHEST_PRECEDENCE
+    override fun getOrder(): Int = Ordered.HIGHEST_PRECEDENCE + 10
 }

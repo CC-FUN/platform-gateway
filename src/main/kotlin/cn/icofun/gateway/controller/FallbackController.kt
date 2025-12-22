@@ -1,8 +1,8 @@
 package cn.icofun.gateway.controller
 
 import cn.icofun.gateway.i18n.I18nMessageUtils
-import cn.icofun.gateway.model.dto.CommonRequestParams
-import cn.icofun.gateway.model.dto.StandardApiResponse
+import cn.icofun.gateway.model.CommonRequestParams
+import cn.icofun.gateway.model.StandardApiResponse
 import cn.icofun.gateway.utils.MdcUtils
 import cn.icofun.gateway.utils.RequestBodyUtils
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -22,7 +22,7 @@ class FallbackController(
     private val logger: Logger = LoggerFactory.getLogger(this::class.java)
 
     private val targetParamNames = listOf(
-        "app_info", "appInfo", // 兼容下划线和驼峰
+        "app_info", "appInfo",
         "timestamp",
         "nonce",
         "trace_id", "traceId",
@@ -45,15 +45,15 @@ class FallbackController(
                         sign = paramMap["sign"] ?: ""
                     )
                 } catch (e: Exception) {
-                    logger.warn("参数转换失败", e)
+                    logger.warn("Failed to parse fallback parameters", e)
                     CommonRequestParams("", "", "", null, "")
                 }
 
                 logger.warn(
-                    "⚡️ 触发服务降级 | Path: {} | AppInfo: {} | TraceID: {}",
+                    "⚡️ Service Fallback Triggered | Path: {} | AppInfo: {} | TraceID: {}",
                     exchange.request.path,
                     commonParams.appInfo.ifBlank { "UNKNOWN" },
-                    MdcUtils.getTraceIdOrDefault()
+                    currentTraceId
                 )
 
                 val fallbackData = mapOf(
@@ -64,22 +64,22 @@ class FallbackController(
                 )
                 val msg = i18nMessageUtils.getMessage(
                     "error.service.busy", // Key
-                    exchange.request,
-                    "Service is busy, please try again later()"
+                    null, exchange.request,
                 )
 
 
                 val response = StandardApiResponse.success<Any>(fallbackData).apply {
                     this.code = 503
                     this.message = msg
-                    this.traceId =currentTraceId
+                    this.traceId = currentTraceId
                 }
 
                 Mono.just(response)
             }
             .defaultIfEmpty(
-                StandardApiResponse.fail<Any>(503,
-                    i18nMessageUtils.getMessage("error.service.busy", exchange.request, "Service is busy")
+                StandardApiResponse.fail<Any>(
+                    503,
+                    i18nMessageUtils.getMessage("error.service.busy", null, exchange.request)
                 ).apply {
                     this.traceId = currentTraceId
                 }

@@ -16,53 +16,31 @@ class I18nMessageUtils(
 ) {
     private val logger: Logger = LoggerFactory.getLogger(this::class.java)
 
-    companion object {
-        private val SUPPORTED_MODULES = arrayOf("common")
-    }
-
     /**
-     * 从ServerHttpRequest获取国际化消息
+     * 智能翻译逻辑：优先找模块内的 Key，找不到再找 common 模块
+     * @param module 服务名 (如 user-service)
+     * @param key 词条键 (如 user.not.found)
      */
     fun getMessage(
         key: String,
+        args: Array<out Any>? = null,
         request: ServerHttpRequest,
-        defaultMessage: String = "",
-        args: Array<out Any>? = null
+        module: String = "platform-gateway" // 默认归属网关
     ): String {
         return try {
-            val locale = LocaleUtils.getValidLocaleFromServerRequest(request, SUPPORTED_MODULES)
-            messageSource.getMessage(key, args, defaultMessage, locale) ?: defaultMessage
-        } catch (ex: Exception) {
-            logger.warn("获取国际化消息失败 key: {}, 使用默认消息: {}", key, defaultMessage, ex)
-            defaultMessage
+            val locale = LocaleUtils.getValidLocaleFromServerRequest(request, arrayOf("common"))
+            if (module == "common") {
+                messageSource.getMessage(key, args, key, locale) ?: key
+            } else {
+                val moduleKey = "$module:$key"
+                // 优先找模块特定的翻译
+                val result = messageSource.getMessage(moduleKey, args, null, locale)
+                // 找不到则找全局定义的该 key (兜底)
+                result ?: messageSource.getMessage(key, args, key, locale) ?: key
+            }
+        }catch (_: Exception){
+            logger.debug("I18n key not found: {}", key)
+            key
         }
     }
-
-    /**
-     * 解析带参数的detail字符串并获取国际化消息
-     * 格式: "detailKey|arg1|arg2|..."
-     */
-    fun getDetailMessage(
-        detailStr: String,
-        request: ServerHttpRequest
-    ): String {
-        if (detailStr.isBlank()) return ""
-
-        // 1. 直接分割，保留空字符串，确保参数索引对齐
-        val detailParts = detailStr.split("|")
-
-        // 2. 获取 Key 并去除首尾空格，防止 " key|arg" 导致找不到 Key
-        val detailKey = detailParts[0].trim()
-
-        // 3. 提取参数数组 (如果只有 key 没有参数，args 为空数组)
-        val detailArgs = if (detailParts.size > 1) {
-            detailParts.drop(1).toTypedArray()
-        } else {
-            emptyArray()
-        }
-
-        // 4. 将 detailKey 同时也作为默认消息，如果找不到国际化配置则直接返回 key
-        return getMessage(detailKey, request, detailKey, detailArgs)
-    }
-
 }

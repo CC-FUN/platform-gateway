@@ -1,153 +1,106 @@
 ﻿package cn.icofun.gateway.exception
 
+import cn.icofun.gateway.i18n.I18nMessageUtils
+import org.springframework.http.server.reactive.ServerHttpRequest
+
 object ExceptionMessageUtils {
 
     /**
-     * 从NumberFormatException的message中提取非法值
-     * 例如: "For input string: \"aa\"" → "aa"
+     * 获取数字格式化异常的本地化消息
      */
-    fun parseIllegalValueFromNumberException(message: String?): String {
-        if (message == null) return "unknown"
+    fun getNumberFormatExceptionMessage(
+        message: String?,
+        i18n: I18nMessageUtils,
+        request: ServerHttpRequest
+    ): String {
+        if (message == null) return i18n.getMessage("error.number.format", arrayOf("unknown"), request)
 
         val regex = Regex("""For input string: "([^"]+)"""")
-        return regex.find(message)?.groupValues?.get(1) ?: "unknown"
+        val value = regex.find(message)?.groupValues?.get(1) ?: "unknown"
+
+        // [重点] 直接在这里调用 getMessage，IDE 就能跟踪到了
+        return i18n.getMessage("error.number.format", arrayOf(value), request)
     }
 
     /**
-     * 解析Jackson的错误消息，提取用户友好的部分
+     * 获取 Jackson 解析异常的本地化消息
      */
-    fun parseJacksonErrorMessage(originalMessage: String?): String {
-        if (originalMessage == null) return "请求体格式错误"
+    fun getJacksonErrorMessage(
+        originalMessage: String?,
+        i18n: I18nMessageUtils,
+        request: ServerHttpRequest
+    ): String {
+        if (originalMessage == null) return i18n.getMessage("error.json.format", null, request)
 
         return when {
-            // 处理缺失必需字段的错误
+            // 缺失必需字段
             originalMessage.contains("missing") &&
                     originalMessage.contains("NULL") &&
                     originalMessage.contains("non-nullable") -> {
                 val fieldName = extractFieldName(originalMessage)
-                "缺少必需字段: $fieldName"
+                i18n.getMessage("error.json.missing_field", arrayOf(fieldName), request)
             }
-            // 处理类型不匹配的错误
+            // 类型不匹配
             originalMessage.contains("Cannot deserialize value") -> {
-                "字段类型不匹配"
+                i18n.getMessage("error.json.type_mismatch", null, request)
             }
-            // 其他Jackson错误
-            else -> "JSON格式错误"
+            // 其他
+            else -> i18n.getMessage("error.json.format", null, request)
         }
     }
 
     /**
-     * 从错误消息中提取字段名
+     * 获取类型转换异常消息 (新增)
      */
+    fun getClassCastErrorMessage(
+        errorMessage: String?,
+        i18n: I18nMessageUtils,
+        request: ServerHttpRequest
+    ): String {
+        val msg = errorMessage ?: ""
+        val key = when {
+            msg.contains("cannot be cast") -> "error.cast.type"
+            else -> "error.cast.generic"
+        }
+        return i18n.getMessage(key, null, request)
+    }
+
+    /**
+     * 获取通用关键错误消息
+     */
+    fun getKeyErrorMessage(
+        fullMessage: String,
+        i18n: I18nMessageUtils,
+        request: ServerHttpRequest
+    ): String {
+        return when {
+            // 参数类型错误
+            fullMessage.contains("primitive type") -> {
+                val paramName = Regex("parameter '(\\w+)'").find(fullMessage)?.groupValues?.get(1) ?: "unknown"
+                i18n.getMessage("error.param.type_mismatch", arrayOf(paramName), request)
+            }
+            // 重复提交
+            fullMessage.contains("duplicate") || fullMessage.contains("already exists") -> {
+                i18n.getMessage("error.data.duplicate", null, request)
+            }
+            // 状态冲突
+            fullMessage.contains("state") || fullMessage.contains("status") -> {
+                i18n.getMessage("error.state.conflict", null, request)
+            }
+            // 默认
+            else -> i18n.getMessage("error.generic", null, request)
+        }
+    }
+
     private fun extractFieldName(errorMessage: String): String {
         val patterns = listOf(
             "JSON property \"(\\w+)\"".toRegex(),
             "JSON property (\\w+)".toRegex()
         )
-
         for (pattern in patterns) {
             val match = pattern.find(errorMessage)
-            if (match != null) {
-                return match.groupValues[1]
-            }
+            if (match != null) return match.groupValues[1]
         }
-        return "未知字段"
+        return "unknown"
     }
-
-    /**
-     * 解析ClassCastException的错误信息，提取有用的部分
-     */
-    fun parseClassCastError(
-        errorMessage: String,
-        errorTypeCast: String,
-        errorTypeCastStandardApi: String,
-        errorTypeCastGeneric: String,
-        errorTypeCastUnknown: String
-    ): Triple<String, String, Array<String>?> {
-        return when {
-            errorMessage.contains("StandardApiResponse cannot be cast to class java.lang.String") -> {
-                Triple(
-                    errorTypeCast,
-                    errorTypeCastStandardApi,
-                    null
-                )
-            }
-
-            errorMessage.contains("cannot be cast") -> {
-                val pattern = "class (\\S+) cannot be cast to class (\\S+)".toRegex()
-                val match = pattern.find(errorMessage)
-                if (match != null) {
-                    val fromType = match.groupValues[1].substringAfterLast(".")
-                    val toType = match.groupValues[2].substringAfterLast(".")
-
-                    Triple(
-                        errorTypeCast,
-                        errorTypeCastGeneric,
-                        arrayOf(fromType, toType)
-                    )
-                } else {
-                    Triple(
-                        errorTypeCast,
-                        errorTypeCastUnknown,
-                        null
-                    )
-                }
-            }
-
-            else ->
-                Triple(
-                    errorTypeCast,
-                    errorTypeCastUnknown,
-                    null
-                )
-        }
-    }
-
-    /**
-     * 构建带参数的detail字符串
-     * 格式: "detailKey|arg1|arg2|..."
-     */
-    fun buildDetailWithArgs(detailKey: String, vararg args: Any?): String {
-        return if (args.isEmpty()) {
-            detailKey
-        } else {
-            "$detailKey|${args.joinToString("|")}"
-        }
-    }
-
-    /**
-     * 从异常消息中提取关键信息
-     */
-    fun extractKeyErrorMessage(fullMessage: String): String {
-        return when {
-            // 处理参数类型错误
-            fullMessage.contains("primitive type") -> {
-                val paramName = Regex("parameter '(\\w+)'").find(fullMessage)?.groupValues?.get(1) ?: "unknown"
-                "参数 '$paramName' 类型不匹配，请使用包装类型代替基本类型"
-            }
-
-            // 处理重复提交
-            fullMessage.contains("duplicate") || fullMessage.contains("already exists") -> {
-                "操作已提交，请勿重复操作"
-            }
-
-            // 处理状态冲突
-            fullMessage.contains("state") || fullMessage.contains("status") -> {
-                "对象状态不符合操作要求"
-            }
-
-            // 默认情况：截取前50个字符
-            fullMessage.length > 50 -> fullMessage.take(50) + "..."
-
-            else -> fullMessage
-        }
-    }
-
-    /**
-     * 判断是否为生产环境
-     */
-    fun isProduction(): Boolean {
-        return System.getenv("SPRING_PROFILES_ACTIVE") == "prod"
-    }
-
 }

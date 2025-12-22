@@ -4,7 +4,7 @@ import org.springframework.web.server.ServerWebExchange
 import java.util.concurrent.ConcurrentHashMap
 
 data class GatewayContext(
-    val exchange: ServerWebExchange,
+    var exchange: ServerWebExchange,
     val attributes: MutableMap<String, Any> = ConcurrentHashMap(),
 ) {
     fun <T> getAttribute(key: String): T? {

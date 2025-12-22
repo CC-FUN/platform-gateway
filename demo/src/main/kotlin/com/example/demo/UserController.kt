@@ -1,23 +1,23 @@
 package com.example.demo
 
-import org.springframework.beans.factory.annotation.Value
-import org.springframework.web.bind.annotation.GetMapping
-import org.springframework.web.bind.annotation.RequestMapping
-import org.springframework.web.bind.annotation.RestController
+import org.springframework.boot.actuate.health.Health
+import org.springframework.boot.actuate.health.HealthIndicator
+import org.springframework.stereotype.Component
 
-@RestController
-@RequestMapping("/users")
-class UserController {
+@Component("manualHealth")
+class ManualHealthIndicator : HealthIndicator {
+    // 默认是健康状态 (UP)
+    private var isUp: Boolean = true
 
-    @Value("\${spring.cloud.nacos.discovery.metadata.version:default}")
-    private val version: String? = null
+    fun setUp(up: Boolean) {
+        this.isUp = up
+    }
 
-    @GetMapping("/info")
-    fun info(): Map<String, Any> {
-        return mapOf(
-            "code" to 200,
-            "message" to "我是 User-Service [$version] 版本", // 返回版本信息
-            "data" to mapOf("name" to "张三", "version" to version)
-        )
+    override fun health(): Health {
+        return if (isUp) {
+            Health.up().withDetail("status", "Manual UP").build()
+        } else {
+            Health.down().withDetail("status", "Manual DOWN - Simulated Failure").build()
+        }
     }
 }

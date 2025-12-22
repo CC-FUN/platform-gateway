@@ -81,4 +81,21 @@ object MdcUtils {
     fun clearAll() {
         MDC.clear()
     }
+
+    /**
+     * 设置通用的MDC键值对
+     * @param key 键
+     * @param value 值
+     */
+    fun put(key: String, value: String) {
+        MDC.put(key, value)
+    }
+
+    /**
+     * 移除指定的MDC键
+     * @param key 键
+     */
+    fun remove(key: String) {
+        MDC.remove(key)
+    }
 }

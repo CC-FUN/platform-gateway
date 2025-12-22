@@ -5,12 +5,11 @@ import cn.icofun.gateway.core.GatewayPlugin
 import cn.icofun.gateway.core.PluginChain
 import cn.icofun.gateway.exception.BusinessException
 import cn.icofun.gateway.service.GatewayConfigService
+import cn.icofun.gateway.utils.IpUtils
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Component
-import org.springframework.web.server.ServerWebExchange
 import reactor.core.publisher.Mono
-import java.net.InetSocketAddress
 
 @Component
 class IpRestrictionPlugin(
@@ -26,7 +25,7 @@ class IpRestrictionPlugin(
     override fun getOrder(): Int = -200
 
     override fun execute(context: GatewayContext, chain: PluginChain): Mono<Void> {
-        val ip = getClientIp(context.exchange)
+        val ip = IpUtils.getClientIp(context.exchange)
 
         log.debug("Incoming request from IP: {}", ip)
 
@@ -41,27 +40,15 @@ class IpRestrictionPlugin(
                     Mono.error(
                         BusinessException(
                             code = 40301,
-                            message = "IP access denied",
+                            message = "secure.ip.denied",
                             httpStatus = HttpStatus.FORBIDDEN.value(),
-                            detail = "Your IP $ip is in the blacklist"
+                            detail = "secure.ip.blocked.detail",
+                            args = arrayOf(ip)
                         )
                     )
                 } else {
                     chain.execute(context)
                 }
             }
-    }
-
-    private fun getClientIp(exchange: ServerWebExchange): String {
-        val headers = exchange.request.headers
-
-        val xForwardedFor = headers.getFirst("X-Forwarded-For")
-
-        if (!xForwardedFor.isNullOrBlank()) {
-            return xForwardedFor.split(",")[0].trim()
-        }
-
-        val remoteAddress: InetSocketAddress? = exchange.request.remoteAddress
-        return remoteAddress?.address?.hostAddress ?: "unknown"
     }
 }

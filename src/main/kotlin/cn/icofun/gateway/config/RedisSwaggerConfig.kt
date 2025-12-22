@@ -58,9 +58,9 @@ class RedisSwaggerConfig(
                     }
                 }
                 swaggerUiConfigProperties.urls = swaggerUrls.toSet()
-                logger.info("🚀 [RedisSwaggerConfig] 自动更新文档列表: {}", swaggerUrls.map { it.url })
+                logger.info("🚀 [RedisSwaggerConfig] Auto-updated Swagger URLs: {}", swaggerUrls.map { it.url })
             }, { error ->
-                logger.error("❌ [RedisSwaggerConfig] 更新文档列表失败", error)
+                logger.error("❌ [RedisSwaggerConfig] Failed to update Swagger URLs", error)
             })
     }
 }

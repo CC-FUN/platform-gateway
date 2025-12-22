@@ -1,6 +1,9 @@
 spring:
   application:
     name: platform-gateway
+  config:
+    import:
+      - "optional:nacos:platform-gateway.yaml"
   data:
     redis:
       host: localhost
@@ -8,10 +11,15 @@ spring:
       database: 0
   cloud:
     nacos:
+      server-addr: localhost:8848
+      username: nacos
+      password: nacos
       discovery:
-        server-addr: localhost:8848
-        username: nacos
-        password: nacos
+        enabled: true
+      config:
+        enabled: true
+        file-extension: yaml
+        group: DEFAULT_GROUP
     gateway:
       server:
         webflux:
@@ -40,7 +48,27 @@ spring:
             locator:
               lower-case-service-id: true
               enabled: true
-
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowed-origin-patterns: "*"
+                allowed-methods: "*"
+                allowed-headers: "*"
+                allowCredentials: true
+          default-filters:
+            - SecureHeaders
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  http:
+    codecs:
+      max-in-memory-size: 10MB
+  r2dbc:
+    url: r2dbc:mysql://localhost:3306/sys?useUnicode=true&characterEncoding=utf8&useSSL=false
+    username: root
+    password: be8769d9ac3f
+    pool:
+      initial-size: 10
+      max-size: 20
 resilience4j:
   circuitbreaker:
     instances:
@@ -69,6 +97,11 @@ server:
       min-spare: 50
     max-connections: 15000
     accept-count: 200
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
+    min-response-size: 1KB
+  shutdown: graceful
 
 management:
   tracing:
@@ -92,6 +125,9 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
+  server:
+    port: 8082
+    address: localhost
 springdoc:
   swagger-ui:
     enabled: true
@@ -102,4 +138,6 @@ springdoc:
   api-docs:
     enabled: true
     path: /v3/api-docs
-
+jwt:
+  secret: "thisIsAVeryLongSecretKeyForJwtSecurityTesting2025"
+  expiration: 86400000
