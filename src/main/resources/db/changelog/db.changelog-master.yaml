@@ -1,0 +1,4 @@
+databaseChangeLog:
+  # 包含其他的变更日志文件
+  - include:
+      file: v1.0.0_init_schema.sql

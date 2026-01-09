@@ -23,6 +23,7 @@ class IpRestrictionPlugin(
 
     override fun getName(): String = "IpRestriction"
     override fun getOrder(): Int = -200
+    override fun isCritical() = true
 
     override fun execute(context: GatewayContext, chain: PluginChain): Mono<Void> {
         val ip = IpUtils.getClientIp(context.exchange)

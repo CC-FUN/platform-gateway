@@ -22,6 +22,7 @@ class ResponseCachePlugin(
 
     override fun getName() = "ResponseCache"
     override fun getOrder() = -50
+    override fun isCritical() = false
 
     override fun execute(context: GatewayContext, chain: PluginChain): Mono<Void> {
         val exchange = context.exchange

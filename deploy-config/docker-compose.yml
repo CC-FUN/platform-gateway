@@ -1,0 +1,255 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # 1. 核心基础设施 (Data & Middleware)
+  # ==========================================
+
+  # MySQL 8.0 (业务数据)
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: platform_db
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      TZ: Asia/Shanghai
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis 7 (缓存 & 限流)
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-root}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Nacos 2.x (注册中心 & 配置中心)
+  nacos:
+    image: nacos/nacos-server:v2.3.0
+    container_name: nacos
+    restart: always
+    environment:
+      - MODE=standalone
+      - JVM_XMS=256m
+      - JVM_XMX=256m
+      - TIME_ZONE=Asia/Shanghai
+      - NACOS_AUTH_ENABLE=true
+      - NACOS_AUTH_TOKEN=VGhpc0lzQVZlcnlMb25nU2VjcmV0S2V5Rm9yTmFjb3NBdXRoMjAyNQ==
+      - NACOS_AUTH_IDENTITY_KEY=nacos
+      - NACOS_AUTH_IDENTITY_VALUE=nacos
+      - NACOS_AUTH_SYSTEM_TYPE=nacos
+    ports:
+      - "127.0.0.1:8848:8848"
+      - "127.0.0.1:9848:9848"
+    volumes:
+      - nacos_data:/home/nacos/data
+      - nacos_logs:/home/nacos/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8848/nacos/v1/console/health/readiness" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  db-migration:
+    build:
+      context: ..
+      dockerfile: ../src/main/resources/docker/Dockerfile.migration
+    container_name: db-migration
+    environment:
+      - LIQUIBASE_COMMAND_URL=jdbc:mysql://mysql:3306/platform_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
+      - LIQUIBASE_COMMAND_USERNAME=root
+      - LIQUIBASE_COMMAND_PASSWORD=${MYSQL_ROOT_PASSWORD:-root}
+      - LIQUIBASE_COMMAND_CHANGELOG_FILE=db.changelog-master.yaml
+      - LIQUIBASE_LOG_LEVEL=info
+    command: update
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  # ==========================================
+  # 3. 可观测性堆栈 (Observability)
+  # ==========================================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.10
+    container_name: elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - bootstrap.memory_lock=true
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: [ "CMD-SHELL", "curl --silent --fail localhost:9200/_cluster/health || exit 1" ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+
+    # ES Exporter (Prometheus 监控 ES)
+  elasticsearch-exporter:
+    image: prometheuscommunity/elasticsearch-exporter:latest
+    container_name: es-exporter
+    restart: unless-stopped
+    command:
+      - '--es.uri=http://elasticsearch:9200'
+    ports:
+      - "127.0.0.1:9114:9114"
+    depends_on:
+      - elasticsearch
+
+  # Logstash (日志收集管道)
+  logstash:
+    image: docker.elastic.co/logstash/logstash:7.17.10
+    container_name: logstash
+    restart: unless-stopped
+    environment:
+      - "LS_JAVA_OPTS=-Xmx512m -Xms512m" # 限制 logstash 内存
+    ports:
+      - "127.0.0.1:9500:9500"
+    volumes:
+      - ./logstash.conf:/usr/share/logstash/pipeline/logstash.conf
+    depends_on:
+      - elasticsearch
+
+  # Zipkin (链路追踪)
+  zipkin:
+    image: openzipkin/zipkin:latest
+    container_name: zipkin
+    restart: unless-stopped
+    environment:
+      - STORAGE_TYPE=elasticsearch
+      - ES_HOSTS=http://elasticsearch:9200
+    ports:
+      - "9411:9411"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  # Prometheus (指标监控)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'  # 日志存 ES 了，指标存15天够用了
+      - '--storage.tsdb.retention.size=50GB'
+      - '--web.enable-lifecycle'
+    ports:
+      - "127.0.0.1:9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    depends_on:
+      - elasticsearch-exporter
+      - zipkin
+
+  # Grafana (可视化)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9300:3000"
+    user: "0"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123456
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_LOG_LEVEL=info
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+  # ==========================================
+  # 4. 核心应用 (WebFlux Gateway)
+  # ==========================================
+
+  gateway:
+    image: platform-gateway:latest
+    container_name: platform-gateway
+    restart: always
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9002:9002"
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      # 动态指向 Docker 内部服务名
+      - SPRING_DATA_REDIS_PASSWORD=${REDIS_PASSWORD:-root}
+      - SPRING_CLOUD_NACOS_PASSWORD=${NACOS_PASSWORD:nacos}
+      - SPRING_R2DBC_PASSWORD=${MYSQL_PASSWORD:-root}
+
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_CLOUD_NACOS_SERVER-ADDR=nacos:8848
+      - SPRING_CLOUD_NACOS_USERNAME=nacos
+      - SPRING_CLOUD_NACOS_DISCOVERY_SERVER-ADDR=nacos:8848
+      - SPRING_R2DBC_URL=r2dbc:mysql://mysql:3306/platform_db?useUnicode=true&characterEncoding=utf8&useSSL=false
+      # 链路追踪 & 日志
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://zipkin:9411/api/v2/spans
+      - LOGSTASH_DESTINATION=logstash:9500
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      nacos:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      zipkin:
+        condition: service_started
+      db-migration:
+        condition: service_completed_successfully
+
+volumes:
+  mysql_data:
+  redis_data:
+  nacos_data:
+  nacos_logs:
+  es_data:
+  prometheus_data:
+  grafana_data:

@@ -13,8 +13,8 @@ import org.springframework.web.server.WebFilter
 import org.springframework.web.server.WebFilterChain
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
-import kotlin.math.min
 
 @Component
 class GlobalBodyCachingFilter : WebFilter, Ordered {
@@ -35,6 +35,11 @@ class GlobalBodyCachingFilter : WebFilter, Ordered {
         val method = request.method
         val path = exchange.request.uri.path
         val traceId = exchange.request.headers.getFirst("X-Trace-Id") ?: "unknown"
+
+        if (path.startsWith("/internal/monitor")) {
+            return chain.filter(exchange)
+        }
+
         logger.debug("[BodyCache] [TraceID: {}] Request: {}, Content-Type: {}", traceId, path, contentType)
 
         if (method == HttpMethod.GET || method == HttpMethod.DELETE) {
@@ -46,56 +51,76 @@ class GlobalBodyCachingFilter : WebFilter, Ordered {
             return chain.filter(exchange)
         }
 
-        return DataBufferUtils.join(exchange.request.body)
-            .flatMap { dataBuffer ->
-                val len = dataBuffer.readableByteCount()
-                val readLen = min(len, MAX_CACHE_BYTES)
-                val traceId = exchange.request.headers.getFirst("X-Trace-Id") ?: "unknown"
+        return limitAndCacheBody(exchange, chain, traceId)
+    }
 
-                logger.debug("[BodyCache] [TraceID: $traceId] Body size: $len bytes, cached: $readLen bytes")
+    private fun limitAndCacheBody(
+        exchange: ServerWebExchange,
+        chain: WebFilterChain,
+        traceId: String
+    ): Mono<Void> {
+        val bodyCollector = ByteArrayOutputStream()
+        var totalRead = 0
 
-                val bytes = ByteArray(readLen)
-                dataBuffer.read(bytes)
+        return exchange.request.body
+            .takeWhile {
+                // ✅ 关键：只要总字节数未超限就继续读取
+                totalRead < MAX_CACHE_BYTES
+            }
+            .doOnNext { dataBuffer ->
+                try {
+                    // 计算本次可读取的字节数
+                    val remaining = MAX_CACHE_BYTES - totalRead
+                    val toRead = minOf(dataBuffer.readableByteCount(), remaining)
 
-                DataBufferUtils.release(dataBuffer)
+                    // 读取数据
+                    val chunk = ByteArray(toRead)
+                    dataBuffer.read(chunk)
+                    bodyCollector.write(chunk)
+                    totalRead += toRead
 
-                val bodyString = String(bytes, StandardCharsets.UTF_8)
-                logger.debug("[BodyCache] [TraceID: $traceId] Cached body preview: ${bodyString.take(100)}...")
+                    logger.trace("[BodyCache] [TraceID: $traceId] Read $toRead bytes, total: $totalRead")
+                } finally {
+                    // ⚠️ 重要：即使不完整消费，也要 release
+                    DataBufferUtils.release(dataBuffer)
+                }
+            }
+            .then(Mono.defer {
+                val cachedBytes = bodyCollector.toByteArray()
+                val bodyString = String(cachedBytes, StandardCharsets.UTF_8)
 
-                // 只存储 String 版本用于 WAF 等插件检查
-                // 不要设置 ServerWebExchangeUtils.CACHED_REQUEST_BODY_ATTR，避免与 Spring Cloud Gateway 内部机制冲突
+                logger.debug(
+                    "[BodyCache] [TraceID: $traceId] Cached ${cachedBytes.size} bytes, " +
+                            "preview: ${bodyString.take(100)}..."
+                )
+
+                // 存储 String 版本供插件使用
                 exchange.attributes[CACHE_REQUEST_BODY_OBJECT_KEY] = bodyString
 
+                // 创建可重复读的请求装饰器
                 val mutatedRequest = object : ServerHttpRequestDecorator(exchange.request) {
                     override fun getBody(): Flux<DataBuffer> {
-                        return if (bytes.isEmpty()) {
+                        return if (cachedBytes.isEmpty()) {
                             Flux.empty()
                         } else {
                             Flux.defer {
-                                val buffer = exchange.response.bufferFactory().wrap(bytes)
-                                logger.trace("[BodyCache] [TraceID: $traceId] Providing cached body to downstream, size: ${bytes.size} bytes")
+                                val buffer = exchange.response.bufferFactory().wrap(cachedBytes)
+                                logger.trace(
+                                    "[BodyCache] [TraceID: $traceId] Providing cached body " +
+                                            "to downstream, size: ${cachedBytes.size} bytes"
+                                )
                                 Flux.just(buffer)
                             }
                         }
                     }
                 }
-                logger.debug("[BodyCache] [TraceID: $traceId] Request decorated successfully, forwarding to filter chain")
+
                 chain.filter(exchange.mutate().request(mutatedRequest).build())
-            }
-            .switchIfEmpty(Mono.defer {
-                val emptyBodyRequest = object : ServerHttpRequestDecorator(exchange.request) {
-                    override fun getBody(): Flux<DataBuffer?> {
-                        return Flux.empty()
-                    }
-                }
-                val traceId = exchange.request.headers.getFirst("X-Trace-Id") ?: "unknown"
-                logger.debug("[BodyCache] [TraceID: $traceId] Request body is empty")
-                chain.filter(exchange.mutate().request(emptyBodyRequest).build())
             })
             .doOnError { error ->
-                val traceId = exchange.request.headers.getFirst("X-Trace-Id") ?: "unknown"
                 logger.error(
-                    "[BodyCache] [TraceID: $traceId] Error processing request body: ${error.javaClass.name} - ${error.message}",
+                    "[BodyCache] [TraceID: $traceId] Error processing request body: " +
+                            "${error.javaClass.name} - ${error.message}",
                     error
                 )
             }

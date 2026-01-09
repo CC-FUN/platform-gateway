@@ -84,7 +84,7 @@ class AttackLogService(
 
                     sb.append("${request.method} ${request.uri.path} HTTP/1.1\n")
 
-                    request.headers.forEach { (k, v) ->
+                    request.headers.forEach { k, v ->
                         sb.append("$k: ${v.joinToString(",")}\n")
                     }
 

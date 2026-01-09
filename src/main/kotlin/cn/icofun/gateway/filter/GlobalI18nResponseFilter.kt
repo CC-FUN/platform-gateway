@@ -25,6 +25,11 @@ class GlobalI18nResponseFilter(
     override fun filter(exchange: ServerWebExchange, chain: GatewayFilterChain): Mono<Void> {
         val route = exchange.getAttribute<Route>(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR)
         val module = route?.uri?.host ?: "common"
+        val path = exchange.request.uri.path
+
+        if (path.startsWith("/internal/monitor")) {
+            return chain.filter(exchange)
+        }
 
         val decoratedResponse = object : ServerHttpResponseDecorator(exchange.response) {
             override fun writeWith(body: Publisher<out DataBuffer>): Mono<Void> {

@@ -10,6 +10,7 @@ import cn.icofun.gateway.model.entity.GatewayConfigHistoryEntity
 import cn.icofun.gateway.model.vo.RouterVo
 import cn.icofun.gateway.model.vo.TokenVo
 import cn.icofun.gateway.service.AuthService
+import cn.icofun.gateway.service.GrafanaSyncService
 import cn.icofun.gateway.service.RoleService
 import cn.icofun.gateway.utils.SecurityUtils
 import org.springframework.web.bind.annotation.*
@@ -21,7 +22,8 @@ import reactor.core.publisher.Mono
 class SystemController(
     private val authService: AuthService,
     private val roleService: RoleService,
-    private val i18nMessageUtils: I18nMessageUtils
+    private val i18nMessageUtils: I18nMessageUtils,
+    private val grafanaSyncService: GrafanaSyncService
 ) {
 
     @LogOperation(module = "auth", description = "User Login")
@@ -62,6 +64,8 @@ class SystemController(
         @RequestBody userToSave: SysUser,
         exchange: ServerWebExchange
     ): Mono<StandardApiResponse<String>> {
+        val rawPassword = userToSave.password
+
         return SecurityUtils.getCurrentUsername()
             .flatMap { currentUsername ->
                 authService.getUser(currentUsername)
@@ -81,6 +85,13 @@ class SystemController(
                 } else {
                     checkRoleEscalation(operator, userToSave.roleIds)
                         .then(authService.saveUser(userToSave))
+                        .flatMap { savedUser ->
+                            grafanaSyncService.createGrafanaUser(
+                                userToSave.username ?: "",
+                                "", // 如果没填邮箱，Service 里会处理默认值
+                                rawPassword ?: ""
+                            ).then(Mono.justOrEmpty(savedUser))
+                        }
                 }
 
                 operation.flatMap {

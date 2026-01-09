@@ -17,7 +17,6 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
-import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 @Service
@@ -46,7 +45,7 @@ class GatewaySecurityRuleService(
      */
     @PostConstruct
     fun initCache() {
-        refreshRulesCache().subscribe()
+        fetchAndSave().subscribe()
     }
 
     /**
@@ -75,7 +74,7 @@ class GatewaySecurityRuleService(
             }
             .switchIfEmpty(
                 // 3. Redis 未命中，回源 DB
-                refreshRulesCache()
+                fetchAndSave()
             )
 
     }
@@ -86,18 +85,25 @@ class GatewaySecurityRuleService(
      */
 
     fun refreshRulesCache(): Mono<List<GatewaySecurityRuleEntity>> {
-        return repository.findAll(Sort.by(Sort.Direction.DESC, "priority")) // 按优先级降序
+        localRuleCache.invalidateAll()
+        return fetchAndSave()
+    }
+
+    private fun fetchAndSave(): Mono<List<GatewaySecurityRuleEntity>> {
+        return repository.findAll(Sort.by(Sort.Direction.DESC, "priority"))
             .collectList()
             .flatMap { rules ->
+                if (rules.isEmpty()) return@flatMap Mono.just(rules)
+
                 val json = objectMapper.writeValueAsString(rules)
-                // 缓存 1 小时，防止永久不一致
-                redisTemplate.opsForValue().set(CACHE_KEY, json, Duration.ofHours(24))
+                // 1. 更新 Redis 缓存
+                redisTemplate.opsForValue().set(CACHE_KEY, json, java.time.Duration.ofHours(24))
+                    .doOnSuccess {
+                        // 2. 更新本地缓存
+                        localRuleCache.put("ALL_RULES", rules)
+                        logger.info("🛡️ 安全规则缓存已重写 (Count: ${rules.size})")
+                    }
                     .thenReturn(rules)
-            }
-            .doOnSuccess { rules ->
-                // 顺便刷新当前节点的 L1
-                localRuleCache.put("ALL_RULES", rules)
-                logger.info("🛡️ 安全规则缓存已刷新 (Count: ${rules.size})")
             }
     }
 

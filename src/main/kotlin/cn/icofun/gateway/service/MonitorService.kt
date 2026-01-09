@@ -3,17 +3,19 @@ package cn.icofun.gateway.service
 import cn.icofun.gateway.model.entity.GatewayConfigHistoryEntity
 import cn.icofun.gateway.repository.GatewayConfigHistoryRepository
 import com.fasterxml.jackson.databind.ObjectMapper
+import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import reactor.core.publisher.Sinks
+import reactor.core.scheduler.Schedulers
 import java.lang.management.ManagementFactory
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDateTime
-import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.*
 
@@ -25,6 +27,19 @@ class MonitorService(
 ) {
     private val log = LoggerFactory.getLogger(this::class.java)
 
+    private data class MetricEvent(
+        val routeId: String,
+        val path: String,
+        val status: Int,
+        val duration: Long,
+        val timestamp: Long
+    )
+
+    private val metricSink = Sinks.many().multicast().onBackpressureBuffer<MetricEvent>(
+        10000,
+        false
+    )
+
     companion object {
         const val STATUS_CLOSED = "CLOSED"
         const val STATUS_OPEN = "OPEN"
@@ -34,7 +49,133 @@ class MonitorService(
         private const val STATUS_PREFIX = "gateway:status"
     }
 
+    @PostConstruct
+    fun init() {
+        metricSink.asFlux()
+            .bufferTimeout(1000, Duration.ofSeconds(1))
+            .publishOn(Schedulers.boundedElastic())
+            .flatMap { events -> processBatchMetrics(events) }
+            .doOnError { e -> log.error("Error in metrics collector loop", e) }
+            .subscribe()
+    }
+
+    /**
+     * 核心：批量处理逻辑
+     * 1. 内存聚合：将 List<Event> 合并为 Map 统计数据
+     * 2. 批量写入：使用 Redis Pipeline 效果
+     */
+    private fun processBatchMetrics(events: List<MetricEvent>): Mono<Void> {
+        if (events.isEmpty()) return Mono.empty()
+
+        val tasks = mutableListOf<Mono<*>>()
+        val now = LocalDateTime.now()
+        val dateKey = getDateKey()
+        val currentMinute = now.hour * 60 + now.minute
+        val currentTimestamp = events.last().timestamp // 使用这批数据最新的时间戳
+
+        // --- A. 内存聚合 (Memory Aggregation) ---
+        var totalReq = 0L
+        var totalErr = 0L
+        val routeReqMap = HashMap<String, Long>() // routeId -> count
+        val routeErrMap = HashMap<String, Long>() // routeId -> count
+        val routeQpsMap = HashMap<String, Long>() // routeId -> count (Current Window)
+
+        // 异常熔断检测专用
+        val circuitCheckMap = HashMap<String, Long>() // routeId -> errCount
+
+        events.forEach { event ->
+            // 1. 全局计数
+            totalReq++
+
+            // 2. 路由计数
+            routeReqMap[event.routeId] = (routeReqMap[event.routeId] ?: 0L) + 1
+            routeQpsMap[event.routeId] = (routeQpsMap[event.routeId] ?: 0L) + 1
+
+            // 3. 错误处理
+            if (event.status >= 400) {
+                totalErr++
+                routeErrMap[event.routeId] = (routeErrMap[event.routeId] ?: 0L) + 1
+            }
+
+            if (event.status >= 500) {
+                circuitCheckMap[event.routeId] = (circuitCheckMap[event.routeId] ?: 0L) + 1
+            }
+
+            // 4. 慢请求审计 (慢请求不聚合，因为需要详细信息，或者也可以单独抽样)
+            if (event.duration > 3000) {
+                // 异步触发，不阻塞主流程
+                triggerAutoAudit(event.routeId, event.path, event.status, "Slow Request Warning (>${event.duration}ms)")
+            }
+        }
+
+        // --- B. 组装 Redis 命令 (Batch Operations) ---
+
+        // 1. 基础统计 (合并为单次调用)
+        if (totalReq > 0) {
+            tasks.add(redisTemplate.opsForValue().increment("$dateKey:total", totalReq))
+            tasks.add(
+                redisTemplate.opsForHash<String, String>()
+                    .increment("$dateKey:trend", currentMinute.toString(), totalReq)
+            )
+
+            // 全局 QPS
+            val globalQpsKey = getGlobalQpsKey(currentTimestamp)
+            tasks.add(
+                redisTemplate.opsForValue().increment(globalQpsKey, totalReq)
+                    .flatMap { redisTemplate.expire(globalQpsKey, Duration.ofMinutes(5)) }
+            )
+
+            // 更新最大 QPS (简单采样，每批次最后做一次检测即可)
+            if (currentTimestamp % 5 == 0L) {
+                tasks.add(updateMaxQps(globalQpsKey))
+            }
+        }
+        // 2. 路由请求统计 (使用 Loop 但已经是聚合后的数据)
+        routeReqMap.forEach { (routeId, count) ->
+            tasks.add(redisTemplate.opsForHash<String, String>().increment("$dateKey:route_req", routeId, count))
+        }
+
+        // 3. 路由实时 QPS
+        val routeQpsKey = getRouteQpsKey(currentTimestamp)
+        routeQpsMap.forEach { (routeId, count) ->
+            tasks.add(redisTemplate.opsForHash<String, String>().increment(routeQpsKey, routeId, count))
+        }
+        // 统一设置过期时间 (仅需设置一次)
+        tasks.add(redisTemplate.expire(routeQpsKey, Duration.ofMinutes(1)))
+
+        // 4. 异常统计
+        if (totalErr > 0) {
+            tasks.add(redisTemplate.opsForValue().increment("$dateKey:error", totalErr))
+        }
+        routeErrMap.forEach { (routeId, count) ->
+            tasks.add(redisTemplate.opsForHash<String, String>().increment("$dateKey:route_err", routeId, count))
+        }
+
+        // 5. 熔断检测 (聚合后的检测)
+        circuitCheckMap.forEach { (routeId, count) ->
+            tasks.add(checkCircuitBreakerBatch(routeId, count))
+        }
+
+        // --- C. 执行 Pipeline ---
+        // Flux.merge 会并行执行这些 Mono，底层 Netty 客户端会自动进行 Pipelining 优化
+        return Flux.merge(tasks)
+            .then()
+            .onErrorResume { e ->
+                log.error("Failed to flush metrics batch", e)
+                Mono.empty()
+            }
+    }
+
+    fun recordMetrics(routeId: String, path: String, status: Int, duration: Long) {
+        // Fire-and-forget: 只是往内存队列里塞一个对象，微秒级耗时
+        metricSink.emitNext(
+            MetricEvent(routeId, path, status, duration, Instant.now().epochSecond),
+            Sinks.EmitFailureHandler.FAIL_FAST // 如果队列满了直接丢弃，不阻塞请求，保证网关稳定性
+        )
+    }
+
     private fun getRouteQpsKey(timestamp: Long) = "$KEY_PREFIX:route_qps:v2:$timestamp"
+
     // --- Key 生成辅助方法 ---
     private fun getDateKey() = "$KEY_PREFIX:daily:${LocalDateTime.now().format(DateTimeFormatter.BASIC_ISO_DATE)}"
     private fun getRouteStatusKey(routeId: String) = "$STATUS_PREFIX:route:$routeId"
@@ -74,64 +215,6 @@ class MonitorService(
     }
 
     /**
-     * 核心：极致优化性能，Fire-and-forget 记录指标
-     */
-    fun recordMetrics(routeId: String, path: String, status: Int, duration: Long) {
-        val now = LocalDateTime.now()
-        val timestamp = Instant.now().epochSecond
-        val dateKey = getDateKey()
-        val currentMinute = now.hour * 60 + now.minute
-
-        val tasks = mutableListOf<Mono<out Any>>()
-
-        // 1. 基础统计
-        tasks.add(redisTemplate.opsForValue().increment("$dateKey:total"))
-        tasks.add(redisTemplate.opsForHash<String, String>().increment("$dateKey:route_req", routeId, 1L))
-        tasks.add(redisTemplate.opsForHash<String, String>().increment("$dateKey:trend", currentMinute.toString(), 1L))
-
-        // 2. 实时 QPS (用于拓扑大屏)
-        val globalQpsKey = getGlobalQpsKey(timestamp)
-        tasks.add(
-            redisTemplate.opsForValue().increment(globalQpsKey)
-                .flatMap { redisTemplate.expire(globalQpsKey, Duration.ofMinutes(5)) })
-
-        val routeQpsKey = getRouteQpsKey(timestamp)
-        tasks.add(
-            redisTemplate.opsForHash<String, String>().increment(routeQpsKey, routeId, 1L)
-                .flatMap { redisTemplate.expire(routeQpsKey, Duration.ofMinutes(1)) }) // 1分钟过期即可
-
-        // 3. 最大 QPS 更新 (采样)
-        if (timestamp % 5 == 0L) {
-            tasks.add(updateMaxQps(globalQpsKey))
-        }
-
-        // 4. 异常处理与熔断
-        if (status >= 400) {
-            tasks.add(redisTemplate.opsForValue().increment("$dateKey:error"))
-            tasks.add(redisTemplate.opsForHash<String, String>().increment("$dateKey:route_err", routeId, 1L))
-        }
-
-        if (status >= 500) {
-            tasks.add(checkCircuitBreaker(routeId))
-        }
-
-        // 5. 慢请求审计
-        if (duration > 3000) {
-            triggerAutoAudit(routeId, path, status, "Slow Request Warning (>${duration}ms)")
-        }
-
-        // 并行执行所有任务
-        Flux.merge(tasks)
-            .doOnError { e ->
-                log.error("Failed to record gateway metrics: {}", e.message)
-            }
-            .onErrorResume {
-                Mono.empty()
-            }
-            .subscribe()
-    }
-
-    /**
      * 【新增】获取当前所有路由的实时 QPS
      * 取最近 3 秒的数据取平均值，使曲线更平滑
      */
@@ -159,16 +242,21 @@ class MonitorService(
             .defaultIfEmpty(emptyMap())
     }
 
-    private fun checkCircuitBreaker(routeId: String): Mono<Void> {
+    private fun checkCircuitBreakerBatch(routeId: String, errorDelta: Long): Mono<Void> {
         val currentMinuteKey = "$KEY_PREFIX:err_window:$routeId:${LocalDateTime.now().minute}"
-        return redisTemplate.opsForValue().increment(currentMinuteKey)
-            .flatMap { errCount ->
-                if (errCount == 1L) {
-                    redisTemplate.expire(currentMinuteKey, Duration.ofSeconds(65)).then(Mono.empty())
-                } else if (errCount >= 50) {
+
+        return redisTemplate.opsForValue().increment(currentMinuteKey, errorDelta)
+            .flatMap { totalErrCount ->
+                val expireMono = if (totalErrCount == errorDelta) {
+                    redisTemplate.expire(currentMinuteKey, Duration.ofSeconds(65))
+                } else Mono.empty()
+
+                val triggerMono = if (totalErrCount >= 50) {
                     log.error("!!! AUTO CIRCUIT BREAKER TRIGGERED for route: $routeId !!!")
                     setRouteStatus(routeId, STATUS_OPEN, "SYSTEM_MONITOR", "High Error Rate (>50/min)").then()
                 } else Mono.empty()
+
+                expireMono.then(triggerMono)
             }
     }
 
@@ -300,7 +388,8 @@ class MonitorService(
     }
 
     private fun triggerAutoAudit(routeId: String, path: String, status: Int, reason: String) {
-        val details = mapOf("path" to path, "status" to status, "time" to LocalDateTime.now().toString(), "msg" to reason)
+        val details =
+            mapOf("path" to path, "status" to status, "time" to LocalDateTime.now().toString(), "msg" to reason)
         recordSystemAudit(routeId, "SYSTEM_AUTO_MONITOR", reason, details).subscribe()
     }
 }

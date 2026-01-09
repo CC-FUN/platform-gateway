@@ -20,6 +20,9 @@ import org.springframework.security.core.context.ReactiveSecurityContextHolder
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.security.web.server.SecurityWebFilterChain
+import org.springframework.web.cors.CorsConfiguration
+import org.springframework.web.cors.reactive.CorsConfigurationSource
+import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource
 import org.springframework.web.server.ServerWebExchange
 import org.springframework.web.server.WebFilter
 import org.springframework.web.server.WebFilterChain
@@ -41,14 +44,18 @@ class SecurityConfig(
     @Bean
     fun springSecurityFilterChain(http: ServerHttpSecurity): SecurityWebFilterChain {
         return http
+            .cors { it.configurationSource(corsConfigurationSource()) }
             .csrf { it.disable() }
+            .headers { headers ->
+                headers.frameOptions { it.disable() }
+            }
             .addFilterBefore(JwtWebFilter(jwtUtils), SecurityWebFiltersOrder.AUTHENTICATION)
             .authorizeExchange { exchanges ->
                 // 1. 跨域预检请求放行
                 exchanges.pathMatchers(HttpMethod.OPTIONS).permitAll()
 
                 // 2. 登录与 Token 刷新接口放行
-                exchanges.pathMatchers("/favicon.ico", "/webjars/**","/sys/login","/sys/refresh").permitAll()
+                exchanges.pathMatchers("/favicon.ico", "/webjars/**", "/sys/login", "/sys/refresh").permitAll()
 
                 exchanges.anyExchange().access(dynamicAuthorizationManager)
             }
@@ -94,27 +101,48 @@ class SecurityConfig(
     class JwtWebFilter(private val jwtUtils: JwtUtils) : WebFilter {
         override fun filter(exchange: ServerWebExchange, chain: WebFilterChain): Mono<Void> {
             val request = exchange.request
-            val authHeader = request.headers.getFirst(HttpHeaders.AUTHORIZATION)
-
-            if (!authHeader.isNullOrBlank() && authHeader.startsWith("Bearer ")) {
-                val token = authHeader.substring(7).trim()
-                try {
-                    if (jwtUtils.validateToken(token)) {
-                        val username = jwtUtils.getUsername(token)
-
-                        // 构造认证信息 (这里暂时给空权限，如果需要 Role 可以在这里添加)
-                        // 比如：val authorities = listOf(SimpleGrantedAuthority("ROLE_ADMIN"))
-                        val auth = UsernamePasswordAuthenticationToken(username, null, null)
-
-                        // 将认证信息写入上下文，Security 就能认出你了
-                        return chain.filter(exchange)
-                            .contextWrite(ReactiveSecurityContextHolder.withAuthentication(auth))
-                    }
-                } catch (_: Exception) {
-                    // Token 无效，忽略，继续往下走（Security 会拦截）
-                }
+            var token = request.headers.getFirst(HttpHeaders.AUTHORIZATION)?.let {
+                if (it.startsWith("Bearer ")) it.substring(7).trim() else null
             }
-            return chain.filter(exchange)
+
+            if (token.isNullOrBlank()) {
+                token = request.cookies.getFirst("Admin-Token")?.value
+            }
+
+            if (token.isNullOrBlank()) {
+                return chain.filter(exchange)
+            }
+
+            return jwtUtils.parseTokenMono(token)
+                .flatMap { claims ->
+                    val username = claims.subject
+                    val auth = UsernamePasswordAuthenticationToken(username, null, listOf())
+
+                    chain.filter(exchange)
+                        .contextWrite(ReactiveSecurityContextHolder.withAuthentication(auth))
+                }.onErrorResume { _ ->
+                    chain.filter(exchange)
+                }
         }
+    }
+
+    @Bean
+    fun corsConfigurationSource(): CorsConfigurationSource {
+        val configuration = CorsConfiguration()
+        // 允许的跨域来源，开发环境可以用 "*" (配合 allowCredentials=true 时需用 allowedOriginPatterns)
+        configuration.allowedOriginPatterns = listOf("*")
+        // 允许的方法
+        configuration.allowedMethods = listOf("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH")
+        // 允许的头信息
+        configuration.allowedHeaders = listOf("*")
+        // 允许携带凭证 (Cookie 等)
+        configuration.allowCredentials = true
+        // 预检请求缓存时间 (秒)
+        configuration.maxAge = 3600L
+
+        val source = UrlBasedCorsConfigurationSource()
+        // 对所有路径生效
+        source.registerCorsConfiguration("/**", configuration)
+        return source
     }
 }

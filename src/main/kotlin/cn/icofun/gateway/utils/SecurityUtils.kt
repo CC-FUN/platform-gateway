@@ -15,7 +15,7 @@ object SecurityUtils {
      */
     fun getCurrentUsername(): Mono<String> {
         return ReactiveSecurityContextHolder.getContext()
-            .map { it.authentication.principal as String }
+            .map { it.authentication?.principal as String }
             .switchIfEmpty(Mono.error(BusinessException(401, "未获取到认证信息")))
     }
 }

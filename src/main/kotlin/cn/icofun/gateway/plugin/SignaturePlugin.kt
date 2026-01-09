@@ -47,6 +47,7 @@ class SignaturePlugin(
     override fun getName(): String = "SignaturePlugin"
     override fun getOrder(): Int = 5
     override fun shouldSkip(context: GatewayContext): Boolean = false
+    override fun isCritical() = true
 
     override fun execute(context: GatewayContext, chain: PluginChain): Mono<Void> {
         val exchange = context.exchange

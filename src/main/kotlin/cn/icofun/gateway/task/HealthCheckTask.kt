@@ -2,19 +2,18 @@ package cn.icofun.gateway.task
 
 import cn.icofun.gateway.loadbalancer.HealthCheckManager
 import org.slf4j.LoggerFactory
-import org.springframework.cloud.client.discovery.DiscoveryClient
+import org.springframework.cloud.client.discovery.ReactiveDiscoveryClient
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.function.client.WebClient
-import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.core.scheduler.Schedulers
 import java.time.Duration
 
 @Component
 class HealthCheckTask(
-    private val discoveryClient: DiscoveryClient,
     private val healthCheckManager: HealthCheckManager,
+    private val discoveryClient: ReactiveDiscoveryClient,
     webClientBuilder: WebClient.Builder
 ) {
     private val log = LoggerFactory.getLogger(this::class.java)
@@ -23,15 +22,14 @@ class HealthCheckTask(
     // 每 10 秒执行一次全量检查
     @Scheduled(fixedRate = 10000)
     fun runHealthCheck() {
-        val services = discoveryClient.services
-
-        Flux.fromIterable(services)
-            .filter { serviceId -> serviceId != "platform-gateway" }
-            .flatMap { serviceId -> Flux.fromIterable(discoveryClient.getInstances(serviceId)) }
+        discoveryClient.services
+            .filter { it != "platform-gateway" }
+            .flatMap { serviceId ->
+                discoveryClient.getInstances(serviceId)
+            }
             .parallel()
             .runOn(Schedulers.boundedElastic())
             .flatMap { instance ->
-                // 建议：使用统一的标识符格式，确保与前端 index.vue 的 match 逻辑一致
                 val instanceId = "${instance.host}:${instance.port}"
                 val url = "http://$instanceId/actuator/health"
 

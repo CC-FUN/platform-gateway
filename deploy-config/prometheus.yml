@@ -1,0 +1,36 @@
+global:
+  scrape_interval: 15s # 全局默认抓取间隔
+
+scrape_configs:
+  # ---------------------------------------------------
+  # 1. 你的应用网关 (按你的要求微调)
+  # ---------------------------------------------------
+  - job_name: 'platform-gateway'
+    scrape_interval: 5s # 你设置了 5s，这就比全局快，适合捕捉瞬时流量
+    metrics_path: '/actuator/prometheus'
+    static_configs:
+      - targets: [ 'host.docker.internal:9002' ]
+
+  # ---------------------------------------------------
+  # 2. Prometheus 自身监控 (用于看 Prometheus Dashboard)
+  # ---------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ---------------------------------------------------
+  # 3. Elasticsearch (用于看 ES Dashboard)
+  # ---------------------------------------------------
+  - job_name: 'elasticsearch'
+    static_configs:
+      # 这里连接的是 docker-compose 里的 es-exporter 服务
+      - targets: ['es-exporter:9114']
+
+  # ---------------------------------------------------
+  # 4. Zipkin (用于看 Zipkin 运行状态)
+  # ---------------------------------------------------
+  - job_name: 'zipkin'
+    metrics_path: '/prometheus'
+    static_configs:
+      # 这里连接的是 docker-compose 里的 zipkin 服务
+      - targets: ['zipkin:9411']

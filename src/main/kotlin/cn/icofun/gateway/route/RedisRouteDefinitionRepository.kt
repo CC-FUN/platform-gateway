@@ -56,7 +56,7 @@ class RedisRouteDefinitionRepository(
                 val routeId = routeDefinition.id
                 val routeJson = objectMapper.writeValueAsString(routeDefinition)
 
-                redisTemplate.opsForHash<String, String>().put(ROUTE_KEY, routeId, routeJson)
+                redisTemplate.opsForHash<String, String>().put(ROUTE_KEY, routeId!!, routeJson)
                     .doOnSuccess {
                         logger.info("Route saved to Redis: {}", routeId)
                     }

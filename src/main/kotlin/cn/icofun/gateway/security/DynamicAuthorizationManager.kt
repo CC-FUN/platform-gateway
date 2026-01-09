@@ -3,6 +3,7 @@ package cn.icofun.gateway.security
 import cn.icofun.gateway.service.GatewaySecurityRuleService
 import org.slf4j.LoggerFactory
 import org.springframework.security.authorization.AuthorizationDecision
+import org.springframework.security.authorization.AuthorizationResult
 import org.springframework.security.authorization.ReactiveAuthorizationManager
 import org.springframework.security.core.Authentication
 import org.springframework.security.web.server.authorization.AuthorizationContext
@@ -31,17 +32,17 @@ class DynamicAuthorizationManager(
 
     @Deprecated("Deprecated in Java")
     @Suppress("DEPRECATION")
-    override fun check(
+    override fun authorize(
         authentication: Mono<Authentication>,
         context: AuthorizationContext
-    ): Mono<AuthorizationDecision> {
+    ): Mono<AuthorizationResult> {
         val exchange = context.exchange
         val requestPath = exchange.request.path.value()
         val requestMethod = exchange.request.method.name()
 
         for (pattern in SYSTEM_WHITE_LIST) {
             if (antPathMatcher.match(pattern, requestPath)) {
-                return Mono.just(AuthorizationDecision(true))
+                return Mono.just(AuthorizationDecision(true) as AuthorizationResult)
             }
         }
 
@@ -77,6 +78,7 @@ class DynamicAuthorizationManager(
                     }
                 }
             }
-            .defaultIfEmpty(AuthorizationDecision(false))
+            .map { it as AuthorizationResult }
+            .defaultIfEmpty(AuthorizationDecision(false) as AuthorizationResult)
     }
 }

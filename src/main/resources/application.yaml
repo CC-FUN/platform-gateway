@@ -6,16 +6,31 @@ spring:
       - "optional:nacos:platform-gateway.yaml"
   data:
     redis:
-      host: localhost
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
       port: 6379
       database: 0
+      username: default
+      password: ${SPRING_DATA_REDIS_PASSWORD:VeryStrongRedisPass123!} # ✅ 动态密码
+  r2dbc:
+    url: ${SPRING_R2DBC_URL:r2dbc:mysql://localhost:3306/platform_db?sslMode=disabled}
+    username: root
+    password: ${SPRING_R2DBC_PASSWORD:VeryStrongRedisPass123!}
+    pool:
+      enabled: true
+      initial-size: 10
+      max-size: 50
+      validation-query: SELECT 1
   cloud:
     nacos:
-      server-addr: localhost:8848
-      username: nacos
-      password: nacos
+      server-addr: ${SPRING_CLOUD_NACOS_SERVER_ADDR:localhost:8848}
+      username: ${SPRING_CLOUD_NACOS_USERNAME:nacos}
+      password: ${SPRING_CLOUD_NACOS_PASSWORD:nacos}
       discovery:
         enabled: true
+        register-enabled: true
+        heart-beat-interval: 3000
+        heart-beat-timeout: 10000
+        ip-delete-timeout: 20000
       config:
         enabled: true
         file-extension: yaml
@@ -23,31 +38,15 @@ spring:
     gateway:
       server:
         webflux:
-          routes:
-            - id: test_route
-              uri: https://httpbin.org
-              predicates:
-                - Path=/api/test/**
-              filters:
-                - StripPrefix=2
-                - name: CircuitBreaker
-                  args:
-                    name: userCircuitBreaker
-                    fallbackUri: forward:/fallback
-            - id: no_found
-              uri: http://localhost:9999
-              predicates:
-                - Path=/api/no/**
-              filters:
-                - StripPrefix=2
-                - name: CircuitBreaker
-                  args:
-                    name: userCircuitBreaker
-                    fallbackUri: forward:/fallback
+          httpclient:
+            max-header-size: 20MB
+          filter:
+            secure-headers:
+              content-security-policy: "default-src 'self' 'unsafe-inline' 'unsafe-eval' http: https: data: blob:;"    # 禁用自动服务注销，避免 Nacos 关闭时的 NPE
           discovery:
             locator:
-              lower-case-service-id: true
               enabled: true
+              lower-case-service-id: true
           globalcors:
             cors-configurations:
               '[/**]':
@@ -55,20 +54,17 @@ spring:
                 allowed-methods: "*"
                 allowed-headers: "*"
                 allowCredentials: true
-          default-filters:
-            - SecureHeaders
+    service-registry:
+      auto-registration:
+        enabled: true
+        fail-fast: false
   lifecycle:
     timeout-per-shutdown-phase: 30s
   http:
     codecs:
-      max-in-memory-size: 10MB
-  r2dbc:
-    url: r2dbc:mysql://localhost:3306/sys?useUnicode=true&characterEncoding=utf8&useSSL=false
-    username: root
-    password: be8769d9ac3f
-    pool:
-      initial-size: 10
-      max-size: 20
+      max-in-memory-size: 20MB
+  reactor:
+    context-propagation: auto
 resilience4j:
   circuitbreaker:
     instances:
@@ -90,26 +86,25 @@ resilience4j:
         cancel-running-future: true
 
 server:
-  port: 8080
-  tomcat:
-    threads:
-      max: 300
-      min-spare: 50
-    max-connections: 15000
-    accept-count: 200
+  port: 9000
   compression:
     enabled: true
     mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
     min-response-size: 1KB
   shutdown: graceful
+  http2:
+    enabled: true
+  max-http-request-header-size: 20MB
 
 management:
+  zipkin:
+    tracing:
+      connect-timeout: 1s
+      endpoint: http://localhost:9411/api/v2/spans
+      encoding: json
   tracing:
     sampling:
-      probability: 1.0
-    baggage:
-      correlation:
-        enabled: true
+      probability: 0.1
   endpoints:
     web:
       exposure:
@@ -117,17 +112,12 @@ management:
   endpoint:
     health:
       show-details: always
-  zipkin:
-    tracing:
-      connect-timeout: 1s
-      endpoint: http://localhost:9411/api/v2/spans
-      encoding: json
   metrics:
     tags:
       application: ${spring.application.name}
   server:
-    port: 8082
-    address: localhost
+    port: 9002
+    address: 127.0.0.1
 springdoc:
   swagger-ui:
     enabled: true
@@ -139,5 +129,11 @@ springdoc:
     enabled: true
     path: /v3/api-docs
 jwt:
-  secret: "thisIsAVeryLongSecretKeyForJwtSecurityTesting2025"
+  secret: ${JWT_SECRET:thisIsAVeryLongSecretKeyForJwtSecurityTesting2025}
   expiration: 86400000
+
+
+grafana:
+  url: "http://localhost:9300"
+  username: "admin"
+  password: ${GRAFANA_PASSWORD:admin123456}

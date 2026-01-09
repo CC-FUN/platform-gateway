@@ -7,7 +7,7 @@ import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.jsonwebtoken.io.DecodingException
 import org.slf4j.LoggerFactory
-import org.springframework.boot.web.reactive.error.ErrorWebExceptionHandler
+import org.springframework.boot.webflux.error.ErrorWebExceptionHandler
 import org.springframework.core.annotation.Order
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType

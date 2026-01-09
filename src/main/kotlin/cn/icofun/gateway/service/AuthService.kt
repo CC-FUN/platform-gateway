@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import java.security.MessageDigest
 import java.time.Duration
 
 @Service
@@ -56,25 +57,41 @@ class AuthService(
     }
 
     fun refreshToken(refreshToken: String): Mono<TokenVo> {
-        return Mono.fromCallable {
-            // 1. 校验 refreshToken 是否有效 (复用 JwtUtils，或者单独签发)
-            val claims = jwtUtils.parseToken(refreshToken)
-            // 实际生产中，RefreshToken 通常会存储在 Redis 中用于强制注销，这里简化为只校验签名
-            claims.subject
-        }.onErrorResume {
-            Mono.error(BusinessException(401, "auth.token.invalid"))
-        }.flatMap { username ->
-            // 2. 签发新的一对 Token
-            createTokenVo(username)
-        }
+        return jwtUtils.parseTokenMono(refreshToken)
+            .map { claims ->
+                claims.subject
+            }.onErrorResume { _ ->
+                Mono.error(BusinessException(401, "auth.token.invalid"))
+            }
+            .flatMap { username ->
+                val redisKey = getRefreshRedisKey(username, refreshToken)
+                redisTemplate.hasKey(redisKey)
+                    .flatMap { exists ->
+                        if (!exists) {
+                            Mono.error(BusinessException(401, "auth.token.revoked_or_reused"))
+                        } else {
+                            redisTemplate.delete(redisKey)
+                                .then(
+                                    createTokenVo(username)
+                                )
+                        }
+                    }
+                redisTemplate.hasKey("refresh_token:$username:$refreshToken")
+                createTokenVo(username)
+            }
     }
 
     private fun createTokenVo(username: String): Mono<TokenVo> {
-        return Mono.fromCallable {
-            val accessToken = jwtUtils.generateToken(username, accessExpiration) // 需修改 JwtUtils 支持传入过期时间
-            val refreshToken = jwtUtils.generateToken(username, refreshExpiration)
-            TokenVo(accessToken, refreshToken, accessExpiration / 1000)
-        }
+        val accessToken = jwtUtils.generateToken(username, accessExpiration) // 需修改 JwtUtils 支持传入过期时间
+        val refreshToken = jwtUtils.generateToken(username, refreshExpiration)
+        val grafanaToken = jwtUtils.generateToken(username, refreshExpiration)
+        val redisKey = getRefreshRedisKey(username, refreshToken)
+        return redisTemplate.opsForValue()
+            .set(redisKey, "1", Duration.ofMillis(refreshExpiration))
+            .map {
+                TokenVo(accessToken, refreshToken, accessExpiration / 1000, grafanaToken)
+            }
+
     }
 
     @LogOperation(module = "用户管理", description = "新增/修改用户")
@@ -92,11 +109,11 @@ class AuthService(
                         .map { it.roleId }
                         .collectList()
                         .flatMap { currentRoleIds ->
-                            val passwordChanged = !user.password.isNullOrBlank()
+                            val passwordChanged = user.password?.isNotBlank()
                             val rolesChanged = user.roleIds != null && user.roleIds.sorted() != currentRoleIds.sorted()
                             val baseInfoChanged = existing.username != user.username || existing.enabled != user.enabled
 
-                            if (!passwordChanged && !rolesChanged && !baseInfoChanged) {
+                            if (!passwordChanged!! && !rolesChanged && !baseInfoChanged) {
                                 // 【极致优化】没有任何变化，直接返回，不写审计记录
                                 return@flatMap Mono.just(existing)
                             }
@@ -104,8 +121,8 @@ class AuthService(
                             recordAudit(existing.id, "Update User (Before)", existing, currentRoleIds)
                                 .then(Mono.defer {
                                     val updatedEntity = existing.copy(
-                                        username = user.username ?: existing.username,
-                                        password = if (passwordChanged) passwordEncoder.encode(user.password) else existing.password,
+                                        username = user.username!!,
+                                        password = if (passwordChanged) passwordEncoder.encode(user.password)!! else existing.password,
                                         enabled = user.enabled
                                     )
                                     userRepository.save(updatedEntity)
@@ -125,7 +142,7 @@ class AuthService(
                 }
                 .switchIfEmpty(Mono.error(BusinessException(404, "auth.user.not_found")))
         } else {
-            if (user.username.isNullOrBlank() || user.password.isNullOrBlank()) {
+            if (user.username!!.isBlank() || user.password!!.isBlank()) {
                 return Mono.error(BusinessException(400, "auth.user.pwd.missing"))
             }
 
@@ -143,7 +160,7 @@ class AuthService(
                     userRepository.save(
                         SysUserEntity(
                             username = user.username,
-                            password = passwordEncoder.encode(user.password),
+                            password = passwordEncoder.encode(user.password)!!,
                             enabled = user.enabled,
                             createTime = user.createTime
                         )
@@ -285,9 +302,18 @@ class AuthService(
         // 确保 Layout 组件路径正确
         val component = if (menu.parentId == 0L && menu.component == null) "Layout" else menu.component ?: "Layout"
 
+        val isExternal =
+            menu.path.startsWith("http://") || menu.path.startsWith("https://") || menu.path.startsWith("mailto:")
+
+        val finalPath = if (menu.parentId == 0L && !menu.path.startsWith("/") && !isExternal) {
+            "/" + menu.path
+        } else {
+            menu.path
+        }
+
         return RouterVo(
-            name = capitalize(menu.path.replace("/", "")),
-            path = if (menu.parentId == 0L && !menu.path.startsWith("/")) "/" + menu.path else menu.path,
+            name = if (isExternal) capitalize(menu.path) else capitalize(menu.path.replace("/", "")),
+            path = finalPath,
             component = component,
             meta = MetaVo(title = menu.title, icon = menu.icon),
             children = children.ifEmpty { null }
@@ -376,8 +402,17 @@ class AuthService(
             .sort(Comparator.comparing(GatewayConfigHistoryEntity::createTime).reversed())
     }
 
-    // 【新增】供 MenuService 清理缓存所需的完整用户实体方法
     fun getUserEntityById(id: Long): Mono<SysUserEntity> {
         return userRepository.findById(id)
+    }
+
+    private fun getRefreshRedisKey(username: String, token: String): String {
+        val tokenHash = md5(token)
+        return "auth:refresh:$username:$tokenHash"
+    }
+
+    private fun md5(input: String): String {
+        val bytes = MessageDigest.getInstance("MD5").digest(input.toByteArray())
+        return bytes.joinToString("") { "%02x".format(it) }
     }
 }

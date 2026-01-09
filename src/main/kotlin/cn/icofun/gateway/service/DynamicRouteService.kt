@@ -1,6 +1,7 @@
 package cn.icofun.gateway.service
 
 import cn.icofun.gateway.exception.BusinessException
+import cn.icofun.gateway.init.GatewayRouteConverter
 import cn.icofun.gateway.model.dto.CustomFilterDTO
 import cn.icofun.gateway.model.dto.CustomPredicateDTO
 import cn.icofun.gateway.model.dto.GatewayRouteDTO
@@ -35,7 +36,8 @@ class DynamicRouteService(
     private val objectMapper: ObjectMapper,
     private val cacheRefreshPublisher: CacheRefreshPublisher,
     private val historyRepository: GatewayConfigHistoryRepository,
-    private val transactionalOperator: TransactionalOperator
+    private val transactionalOperator: TransactionalOperator,
+    private val gatewayRouteConverter: GatewayRouteConverter
 ) {
     private val logger = LoggerFactory.getLogger(this::class.java)
     private val CONFIG_TYPE = "ROUTE"
@@ -46,7 +48,7 @@ class DynamicRouteService(
         logger.info("开始加载网关动态路由...")
         routeRepository.findAll()
             .flatMap { entity ->
-                val definition = convertToRouteDefinition(entity)
+                val definition = gatewayRouteConverter.convert(entity)
                 redisRepository.save(Mono.just(definition))
             }
             .doOnComplete { logger.info("网关动态路由加载完成") }
@@ -179,7 +181,7 @@ class DynamicRouteService(
         return routeRepository.findAll()
             .filter { it.enabled }
             .flatMap { entity ->
-                val definition = convertToRouteDefinition(entity)
+                val definition = gatewayRouteConverter.convert(entity)
                 redisRepository.save(Mono.just(definition))
             }
             .then(Mono.fromRunnable {
@@ -213,50 +215,6 @@ class DynamicRouteService(
             enabled = dto.enabled,       // DTO 里的 enabled
             description = dto.description // DTO 里的 description
         )
-    }
-
-    private fun convertToRouteDefinition(entity: GatewayRouteEntity): RouteDefinition {
-        val definition = RouteDefinition()
-        definition.id = entity.id
-        definition.uri = URI.create(entity.uri)
-        definition.order = entity.orderNum
-
-        try {
-            val customPredicates: List<CustomPredicateDTO> = objectMapper.readValue(
-                entity.predicates, object : TypeReference<List<CustomPredicateDTO>>() {}
-            )
-            val customFilters: List<CustomFilterDTO> = objectMapper.readValue(
-                entity.filters, object : TypeReference<List<CustomFilterDTO>>() {}
-            )
-
-            definition.predicates = customPredicates.map { cp ->
-                val pd = PredicateDefinition()
-                pd.name = cp.name
-                // 处理 patterns:[a,b] -> patterns:a,b
-                pd.args = cp.args.mapValues { (_, v) ->
-                    if (v is List<*>) v.joinToString(",") else v.toString()
-                }
-                pd
-            }
-
-            definition.filters = customFilters.map { cf ->
-                val fd = FilterDefinition()
-                fd.name = cf.name
-                fd.args = cf.args.mapValues { (_, v) -> v.toString() }
-                fd
-            }
-
-            definition.metadata = objectMapper.readValue(
-                entity.metadata, object : TypeReference<Map<String, Any>>() {}
-            )
-        } catch (e: Exception) {
-            logger.error("路由解析失败: ${entity.id}", e)
-            // 防止单个路由错误导致整个系统崩溃，返回空列表
-            definition.predicates = emptyList()
-            definition.filters = emptyList()
-        }
-
-        return definition
     }
 
     private fun convertEntityToDto(entity: GatewayRouteEntity): GatewayRouteDTO {
@@ -334,7 +292,7 @@ class DynamicRouteService(
                     .then(routeRepository.save(existing.copy(metadata = updatedMetaJson).apply { markNotNew() }))
                     .flatMap { saved ->
                         // 5. 将更新后的路由重新同步到 Redis 并通知集群刷新 L1
-                        val definition = convertToRouteDefinition(saved)
+                        val definition = gatewayRouteConverter.convert(saved)
                         redisRepository.save(Mono.just(definition))
                             .then(publishAndBroadcastRoutes())
                     }

@@ -27,7 +27,7 @@ class GrayLoadBalancer(
     private val logger = LoggerFactory.getLogger(this::class.java)
     private val GRAY_HEADER = "Gray-Version" // 定义灰度请求头
 
-    override fun choose(request: Request<*>?): Mono<Response<ServiceInstance>> {
+    override fun choose(request: Request<*>): Mono<Response<ServiceInstance>> {
         val supplier = serviceInstanceListSupplierProvider.getIfAvailable { NoopServiceInstanceListSupplier() }
         return supplier.get(request).next().map { serviceInstances ->
             processInstanceSelection(serviceInstances, request)
@@ -38,7 +38,10 @@ class GrayLoadBalancer(
         instances: List<ServiceInstance>,
         request: Request<*>?
     ): Response<ServiceInstance> {
-        if (instances.isEmpty()) return EmptyResponse()
+        if (instances.isEmpty()) {
+            logger.warn("[GrayLB] Service [$serviceId] has NO instances available!")
+            return EmptyResponse()
+        }
 
         // 1. 基础健康检查过滤 (结合本地黑名单)
         val healthyInstances = instances.filter {
@@ -56,9 +59,9 @@ class GrayLoadBalancer(
         // 3. 版本筛选：如果 Header 指定了版本，只在对应版本里挑
         val candidates = if (!grayVersion.isNullOrBlank()) {
             val matched = availableInstances.filter {
-                grayVersion.equals(it.metadata["version"], ignoreCase = true)
+                grayVersion.equals(it.metadata?.get("version"), ignoreCase = true)
             }
-            if (matched.isNotEmpty()) matched else availableInstances
+            matched.ifEmpty { availableInstances }
         } else {
             availableInstances
         }
@@ -72,43 +75,36 @@ class GrayLoadBalancer(
 
         // 计算总权重 (默认权重设为 100)
         val totalWeight = instances.sumOf { instance ->
-            val weight = when (val w = instance.metadata["weight"]) {
-                is Number -> {
-                    logger.debug("[GrayLB] Instance ${instance.host}:${instance.port} weight is Number: $w")
-                    w.toInt()
-                }
-                is String -> {
-                    val parsed = w.toIntOrNull() ?: 100
-                    logger.debug("[GrayLB] Instance ${instance.host}:${instance.port} weight is String: '$w' -> $parsed")
-                    parsed
-                }
-                else -> {
-                    logger.warn("[GrayLB] Instance ${instance.host}:${instance.port} weight is unknown type: ${w?.javaClass?.name}, using default 100")
-                    100
-                }
-            }
+            val weightStr = instance.metadata?.get("weight")
+            val weight = weightStr?.toIntOrNull() ?: 100
+            logger.debug(
+                "[GrayLB] {} Instance {}:{} weight: {} -> {}",
+                serviceId,
+                instance.host,
+                instance.port,
+                weightStr,
+                weight
+            )
+
             weight
         }
 
         // 如果权重设置异常或均为0，降级为完全随机
         if (totalWeight <= 0) {
-            logger.warn("[GrayLB] Total weight is $totalWeight, using random selection")
+            logger.warn("[GrayLB] {} Total weight is {}, using random selection", serviceId, totalWeight)
             return instances[ThreadLocalRandom.current().nextInt(instances.size)]
         }
-        
-        logger.debug("[GrayLB] Total weight: $totalWeight, instance count: ${instances.size}")
-        
+
+        logger.debug("[GrayLB] {} Total weight: {}, instance count: {}", serviceId, totalWeight, instances.size)
+
         // 核心：加权随机算法
         var randomPos = ThreadLocalRandom.current().nextInt(totalWeight)
         for (instance in instances) {
-            val weight = when (val w = instance.metadata["weight"]) {
-                is Number -> w.toInt()
-                is String -> w.toIntOrNull() ?: 100
-                else -> 100
-            }
+            val weightStr = instance.metadata?.get("weight")
+            val weight = weightStr?.toIntOrNull() ?: 100
             randomPos -= weight
             if (randomPos < 0) {
-                logger.debug("[GrayLB] Selected instance: ${instance.host}:${instance.port}")
+                logger.debug("[GrayLB] {} Selected instance: {}:{}", serviceId, instance.host, instance.port)
                 return instance
             }
         }

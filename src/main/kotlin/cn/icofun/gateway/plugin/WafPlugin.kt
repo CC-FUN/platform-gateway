@@ -29,6 +29,7 @@ class WafPlugin(
 
     override fun getName(): String = "WafPlugin"
     override fun getOrder(): Int = -10
+    override fun isCritical(): Boolean = true
 
     override fun execute(context: GatewayContext, chain: PluginChain): Mono<Void> {
         val exchange = context.exchange
@@ -43,10 +44,12 @@ class WafPlugin(
                 logger.debug("[WAF] [TraceID: $traceId] [Route: $routeId] waf_enabled type: Boolean, value: $value")
                 value.toString()
             }
+
             is String -> {
                 logger.debug("[WAF] [TraceID: $traceId] [Route: $routeId] waf_enabled type: String, value: '$value'")
                 value
             }
+
             else -> {
                 logger.debug("[WAF] [TraceID: $traceId] [Route: $routeId] waf_enabled type: ${value?.javaClass?.name ?: "null"}, using default: true")
                 "true"
@@ -63,9 +66,14 @@ class WafPlugin(
         logger.debug("[WAF] [TraceID: $traceId] [Route: $routeId] Checking request body, size: ${cachedBody.length} chars")
 
         val uriPath = request.uri.path
-        val headers = request.headers
-        val queryParams = request.queryParams
-
+        val headerMap = HashMap<String, List<String>>()
+        request.headers.forEach { key, value ->
+            headerMap[key] = value
+        }
+        val queryMap = HashMap<String, List<String>>()
+        request.queryParams.forEach { key, value ->
+            queryMap[key] = value
+        }
         return wafRuleService.getActiveRules()
             .doOnSubscribe {
                 logger.debug("[WAF] [TraceID: $traceId] [Route: $routeId] Starting WAF rule evaluation...")
@@ -77,14 +85,16 @@ class WafPlugin(
                 val isMatch = when (rule.matchField.uppercase()) {
                     "BODY" -> checkRisk(cachedBody, rule.pattern)
                     "URI" -> checkRisk(uriPath, rule.pattern)
-                    "HEADER" -> headers.any { (k, v) ->
-                        // 检测 Header 的 Key 和 Value
-                        checkRisk(k, rule.pattern) || v.any { checkRisk(it, rule.pattern) }
+                    "HEADER" -> headerMap.entries.any { entry ->
+                        val key = entry.key
+                        val values = entry.value
+                        checkRisk(key, rule.pattern) || values.any { checkRisk(it, rule.pattern) }
                     }
 
-                    "QUERY" -> queryParams.any { (k, v) ->
-                        // 检测 Query 参数的 Key 和 Value
-                        checkRisk(k, rule.pattern) || v.any { checkRisk(it, rule.pattern) }
+                    "QUERY" -> queryMap.entries.any { entry ->
+                        val key = entry.key
+                        val values = entry.value
+                        checkRisk(key, rule.pattern) || values.any { checkRisk(it, rule.pattern) }
                     }
 
                     else -> false // 未知域忽略
@@ -145,7 +155,7 @@ class WafPlugin(
         }
 
         return try {
-            regex.toRegex(RegexOption.IGNORE_CASE).containsMatchIn(input)
+            regex.toRegex(RegexOption.IGNORE_CASE).containsMatchIn(input!!)
         } catch (e: Exception) {
             logger.error("Invalid WAF Regex pattern: $regex", e)
             false

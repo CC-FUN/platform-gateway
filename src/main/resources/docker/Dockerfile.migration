@@ -1,0 +1,15 @@
+FROM liquibase/liquibase:latest
+
+USER root
+
+RUN wget -O /liquibase/lib/mysql-connector-j.jar https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar
+
+COPY src/main/resources/db/changelog /liquibase/changelog
+
+RUN chown -R liquibase:liquibase /liquibase/changelog
+
+USER liquibase
+
+WORKDIR /liquibase/changelog
+
+CMD ["--changelog-file=db/changelog/db.changelog-master.yaml", "update"]

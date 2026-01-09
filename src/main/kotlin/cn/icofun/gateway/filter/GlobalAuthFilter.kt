@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.filter.GatewayFilterChain
 import org.springframework.cloud.gateway.filter.GlobalFilter
 import org.springframework.core.Ordered
+import org.springframework.security.core.Authentication
 import org.springframework.security.core.context.ReactiveSecurityContextHolder
 import org.springframework.stereotype.Component
 import org.springframework.util.AntPathMatcher
@@ -24,10 +25,15 @@ class GlobalAuthFilter(
         val localeStr = LocaleUtils.getValidLocale(exchange, arrayOf("common")).toString()
 
         val requestBuilder = exchange.request.mutate()
+            .headers { httpHeaders ->
+                httpHeaders.remove("X-User-Name")
+                httpHeaders.remove("X-User-Id")
+                httpHeaders.remove("X-Locale")
+            }
         requestBuilder.header("X-Locale", localeStr)
 
         return gatewayConfigService.getJwtWhitelistFromCache()
-            .flatMap { whitelist ->
+            .flatMap<Void> { whitelist ->
                 val isWhitelisted = whitelist.any { pattern -> pathMatcher.match(pattern, path) }
 
                 if (isWhitelisted) {
@@ -42,9 +48,13 @@ class GlobalAuthFilter(
                 // 3. 非白名单，尝试获取登录用户信息并注入 Header
                 // (这一步依赖外层 Spring Security 已经完成了鉴权)
                 return@flatMap ReactiveSecurityContextHolder.getContext()
-                    .map { it.authentication }
-                    .filter { it != null && it.isAuthenticated }
-                    .flatMap { auth ->
+                    .handle<Authentication> { ctx, sink ->
+                        val auth = ctx.authentication
+                        if (auth != null && auth.isAuthenticated) {
+                            sink.next(auth)
+                        }
+                    }
+                    .doOnNext { auth ->
                         val username = auth.principal.toString()
                         // 注入用户身份 Header 供下游微服务使用
                         requestBuilder.header("X-User-Id", username)
@@ -53,12 +63,11 @@ class GlobalAuthFilter(
                         if (logger.isDebugEnabled) {
                             logger.debug("🔑 Authenticated user: $username, headers injected.")
                         }
-
-                        chain.filter(exchange.mutate().request(requestBuilder.build()).build())
                     }
-                    .switchIfEmpty(
-                        // 未登录或无上下文（可能是匿名访问的非白名单接口，交由 Spring Security 最终拦截）
-                        chain.filter(exchange.mutate().request(requestBuilder.build()).build())
+                    .then(
+                        Mono.defer {
+                            chain.filter(exchange.mutate().request(requestBuilder.build()).build())
+                        }
                     )
             }
     }
