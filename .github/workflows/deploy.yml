@@ -3,6 +3,7 @@ name: Ultimate Deploy (Maven)
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   DEPLOY_PATH: /home/nic0/app/gateway
