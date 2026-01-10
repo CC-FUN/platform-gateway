@@ -75,9 +75,7 @@ services:
       retries: 10
 
   db-migration:
-    build:
-      context: ..
-      dockerfile: src/main/resources/docker/Dockerfile.migration
+    image: db-migration:latest
     container_name: db-migration
     environment:
       - LIQUIBASE_COMMAND_URL=jdbc:mysql://mysql:3306/platform_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai

@@ -39,10 +39,7 @@ jobs:
 
       # 4. 构建数据库迁移镜像 (如果有的话)
       - name: Build Migration Image
-        run: |
-          if [ -f "src/main/resources/docker/Dockerfile.migration" ]; then
-            docker build -t db-migration:latest -f src/main/resources/docker/Dockerfile.migration .
-          fi
+        run: docker build -t db-migration:latest -f src/main/resources/docker/Dockerfile.migration .
 
       # 5. 同步配置文件 (将 deploy-config 里的文件复制到 nic0 的目录)
       - name: Sync Config
