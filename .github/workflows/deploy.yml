@@ -1,0 +1,63 @@
+name: Ultimate Deploy (Maven)
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  DEPLOY_PATH: /home/nic0/app/gateway
+  IMAGE_NAME: gateway-admin
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted # 指定在你的 VPS 上跑
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 1. 配置 Java 环境
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven' # 开启 Maven 缓存，第二次构建飞快
+
+      # 2. Maven 打包 (跳过测试)
+      - name: Grant execute permission for mvnw
+        run: ./mvnw clean package -DskipTests
+        # 如果 ./mvnw 报错权限不足，可以先运行: chmod +x mvnw
+
+      # 3. 构建应用镜像 (使用刚才改好的 Dockerfile)
+      - name: Build App Image
+        run: docker build -t ${{ env.IMAGE_NAME }}:latest .
+
+      # 4. 构建数据库迁移镜像 (如果有的话)
+      - name: Build Migration Image
+        run: |
+          if [ -f "src/main/resources/docker/Dockerfile.migration" ]; then
+            docker build -t db-migration:latest -f src/main/resources/docker/Dockerfile.migration .
+          fi
+
+      # 5. 同步配置文件 (将 deploy-config 里的文件复制到 nic0 的目录)
+      - name: Sync Config
+        run: |
+          mkdir -p ${{ env.DEPLOY_PATH }}
+          cp deploy-config/docker-compose.yml ${{ env.DEPLOY_PATH }}/
+          cp deploy-config/logstash.conf ${{ env.DEPLOY_PATH }}/
+          cp deploy-config/prometheus.yml ${{ env.DEPLOY_PATH }}/
+
+      # 6. 部署重启
+      - name: Deploy
+        env:
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          NACOS_PASSWORD: ${{ secrets.NACOS_PASSWORD }}
+        run: |
+          cd ${{ env.DEPLOY_PATH }}
+          # 强制拉取最新构建的本地镜像并重启
+          docker-compose down
+          docker-compose up -d
+          # 清理垃圾镜像
+          docker image prune -f --filter "until=24h"
