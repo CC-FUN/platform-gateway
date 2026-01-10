@@ -57,8 +57,9 @@ jobs:
           NACOS_PASSWORD: ${{ secrets.NACOS_PASSWORD }}
         run: |
           cd ${{ env.DEPLOY_PATH }}
+          docker-compose down --remove-orphans
+          docker rm -f es-exporter elasticsearch redis mysql platform-gateway nacos || true
           # 强制拉取最新构建的本地镜像并重启
-          docker-compose down
           docker-compose up -d
           # 清理垃圾镜像
           docker image prune -f --filter "until=24h"
