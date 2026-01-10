@@ -7,7 +7,7 @@ on:
 
 env:
   DEPLOY_PATH: /home/nic0/app/gateway
-  IMAGE_NAME: gateway-admin
+  IMAGE_NAME: platform-gateway
 
 jobs:
   build-and-deploy:
