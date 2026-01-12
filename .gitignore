@@ -1,9 +1,19 @@
 target/
+*.class
+*.jar
+*.war
+
+logs/
+*.log
+*.log.gz
+
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
 
-*.env
+
+
+.env
 
 ### STS ###
 .apt_generated
