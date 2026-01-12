@@ -210,6 +210,9 @@ services:
   gateway:
     image: platform-gateway:latest
     container_name: platform-gateway
+    volumes:
+      - ./logs:/app/logs
+    user: root
     restart: always
     ports:
       - "127.0.0.1:9000:9000"
