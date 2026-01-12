@@ -97,12 +97,12 @@ services:
     restart: unless-stopped
     environment:
       - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - bootstrap.memory_lock=true
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 1G
     ulimits:
       memlock:
         soft: -1
@@ -138,7 +138,7 @@ services:
     container_name: logstash
     restart: unless-stopped
     environment:
-      - "LS_JAVA_OPTS=-Xmx512m -Xms512m" # 限制 logstash 内存
+      - "LS_JAVA_OPTS=-Xmx256m -Xms256m" # 限制 logstash 内存
     ports:
       - "127.0.0.1:9500:9500"
     volumes:
@@ -151,6 +151,10 @@ services:
     image: openzipkin/zipkin:latest
     container_name: zipkin
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     environment:
       - STORAGE_TYPE=elasticsearch
       - ES_HOSTS=http://elasticsearch:9200
@@ -228,10 +232,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
           memory: 1G
         reservations:
-          cpus: '0.5'
           memory: 512M
     depends_on:
       nacos:
