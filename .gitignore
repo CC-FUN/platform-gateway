@@ -62,4 +62,8 @@ ehthumbs.db
 Thumbs.db
 
 .env
-.env.local
+.env.
+
+HELP.md
+.gitattributes
+demo/
