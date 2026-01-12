@@ -75,9 +75,7 @@ services:
       retries: 10
 
   db-migration:
-    build:
-      context: ..
-      dockerfile: ../src/main/resources/docker/Dockerfile.migration
+    image: db-migration:latest
     container_name: db-migration
     environment:
       - LIQUIBASE_COMMAND_URL=jdbc:mysql://mysql:3306/platform_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
@@ -99,12 +97,12 @@ services:
     restart: unless-stopped
     environment:
       - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
       - bootstrap.memory_lock=true
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 1G
     ulimits:
       memlock:
         soft: -1
@@ -140,7 +138,7 @@ services:
     container_name: logstash
     restart: unless-stopped
     environment:
-      - "LS_JAVA_OPTS=-Xmx512m -Xms512m" # 限制 logstash 内存
+      - "LS_JAVA_OPTS=-Xmx256m -Xms256m" # 限制 logstash 内存
     ports:
       - "127.0.0.1:9500:9500"
     volumes:
@@ -153,6 +151,10 @@ services:
     image: openzipkin/zipkin:latest
     container_name: zipkin
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     environment:
       - STORAGE_TYPE=elasticsearch
       - ES_HOSTS=http://elasticsearch:9200
@@ -208,6 +210,9 @@ services:
   gateway:
     image: platform-gateway:latest
     container_name: platform-gateway
+    volumes:
+      - ./logs:/app/logs
+    user: root
     restart: always
     ports:
       - "127.0.0.1:9000:9000"
@@ -216,7 +221,7 @@ services:
       - SPRING_PROFILES_ACTIVE=prod
       # 动态指向 Docker 内部服务名
       - SPRING_DATA_REDIS_PASSWORD=${REDIS_PASSWORD:-root}
-      - SPRING_CLOUD_NACOS_PASSWORD=${NACOS_PASSWORD:nacos}
+      - SPRING_CLOUD_NACOS_PASSWORD=${NACOS_PASSWORD:-nacos}
       - SPRING_R2DBC_PASSWORD=${MYSQL_PASSWORD:-root}
 
       - SPRING_DATA_REDIS_HOST=redis
@@ -230,10 +235,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2.0'
           memory: 1G
         reservations:
-          cpus: '0.5'
           memory: 512M
     depends_on:
       nacos:

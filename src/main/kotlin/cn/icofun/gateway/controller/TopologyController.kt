@@ -89,7 +89,7 @@ class TopologyController(
 
         return redisTemplate.opsForValue().multiGet(keys)
             .map { list ->
-                val data = list.map { it?.toLongOrNull() ?: 0L }
+                val data = list.map { it.toLongOrNull() ?: 0L }
                 StandardApiResponse.success(data)
             }
     }

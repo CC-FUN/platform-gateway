@@ -7,7 +7,7 @@ on:
 
 env:
   DEPLOY_PATH: /home/nic0/app/gateway
-  IMAGE_NAME: gateway-admin
+  IMAGE_NAME: platform-gateway
 
 jobs:
   build-and-deploy:
@@ -27,6 +27,9 @@ jobs:
 
       # 2. Maven 打包 (跳过测试)
       - name: Grant execute permission for mvnw
+        run: chmod +x mvnw
+
+      - name: Build with Maven
         run: ./mvnw clean package -DskipTests
         # 如果 ./mvnw 报错权限不足，可以先运行: chmod +x mvnw
 
@@ -36,10 +39,7 @@ jobs:
 
       # 4. 构建数据库迁移镜像 (如果有的话)
       - name: Build Migration Image
-        run: |
-          if [ -f "src/main/resources/docker/Dockerfile.migration" ]; then
-            docker build -t db-migration:latest -f src/main/resources/docker/Dockerfile.migration .
-          fi
+        run: docker build -t db-migration:latest -f src/main/resources/docker/Dockerfile.migration .
 
       # 5. 同步配置文件 (将 deploy-config 里的文件复制到 nic0 的目录)
       - name: Sync Config
@@ -57,8 +57,9 @@ jobs:
           NACOS_PASSWORD: ${{ secrets.NACOS_PASSWORD }}
         run: |
           cd ${{ env.DEPLOY_PATH }}
+          docker-compose down --remove-orphans
+          docker rm -f es-exporter elasticsearch redis mysql platform-gateway nacos || true
           # 强制拉取最新构建的本地镜像并重启
-          docker-compose down
           docker-compose up -d
           # 清理垃圾镜像
           docker image prune -f --filter "until=24h"

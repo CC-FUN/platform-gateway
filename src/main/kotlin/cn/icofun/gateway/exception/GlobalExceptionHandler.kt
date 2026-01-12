@@ -51,7 +51,7 @@ class GlobalExceptionHandler(
                 val msg = if (cause is DecodingException) {
                     ExceptionMessageUtils.getJacksonErrorMessage(cause.message, i18nMessageUtils, request)
                 } else {
-                    ExceptionMessageUtils.getKeyErrorMessage(ex.message ?: "", i18nMessageUtils, request)
+                    ExceptionMessageUtils.getKeyErrorMessage(ex.message!!, i18nMessageUtils, request)
                 }
                 Triple(HttpStatus.BAD_REQUEST, 400, msg)
             }

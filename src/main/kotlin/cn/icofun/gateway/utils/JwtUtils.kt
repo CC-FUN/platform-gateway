@@ -51,8 +51,7 @@ class JwtUtils {
 
     fun generateToken(username: String, expire: Long): String {
         val now = Date()
-        val actualExpire = expire ?: expiration
-        val expiryDate = Date(now.time + actualExpire)
+        val expiryDate = Date(now.time + expire)
 
         return Jwts.builder()
             .subject(username)

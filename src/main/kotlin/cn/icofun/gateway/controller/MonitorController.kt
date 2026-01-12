@@ -55,7 +55,7 @@ class MonitorController(
                 val result = values.mapIndexed { index, value ->
                     mapOf(
                         "time" to (start + index),
-                        "value" to (value?.toLong() ?: 0L)
+                        "value" to (value.toLong())
                     )
                 }
                 StandardApiResponse.success(result)

@@ -22,7 +22,7 @@
 
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
             <fileNamePattern>logs/app-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
-            <maxFileSize>1MB</maxFileSize>
+            <maxFileSize>10MB</maxFileSize>
             <maxHistory>180</maxHistory>
         </rollingPolicy>
     </appender>
@@ -35,7 +35,7 @@
     </appender>
 
     <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
-        <destination>localhost:9500</destination>
+        <destination>logstash:9500</destination>
 
         <encoder class="net.logstash.logback.encoder.LogstashEncoder">
             <includeMdcKeyName>traceId</includeMdcKeyName>

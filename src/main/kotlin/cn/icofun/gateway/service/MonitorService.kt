@@ -266,8 +266,8 @@ class MonitorService(
                 val maxKey = getMaxQpsKey()
                 redisTemplate.opsForValue().get(maxKey).defaultIfEmpty("0")
                     .flatMap { max ->
-                        if ((current?.toLong() ?: 0) > max.toLong()) {
-                            redisTemplate.opsForValue().set(maxKey, current!!, Duration.ofDays(1))
+                        if (current != null && current.toLong() > max.toLong()) {
+                            redisTemplate.opsForValue().set(maxKey, current, Duration.ofDays(1))
                         } else Mono.empty()
                     }
             }.then()
