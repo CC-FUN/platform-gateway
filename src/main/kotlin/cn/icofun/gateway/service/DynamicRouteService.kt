@@ -16,9 +16,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.annotation.PostConstruct
 import org.slf4j.LoggerFactory
 import org.springframework.cloud.gateway.event.RefreshRoutesEvent
-import org.springframework.cloud.gateway.filter.FilterDefinition
-import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition
-import org.springframework.cloud.gateway.route.RouteDefinition
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
@@ -26,7 +23,9 @@ import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.reactive.TransactionalOperator
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
+import reactor.core.scheduler.Schedulers
 import java.net.URI
+import java.time.Duration
 
 @Service
 class DynamicRouteService(
@@ -46,14 +45,20 @@ class DynamicRouteService(
     @PostConstruct
     fun initRoutes() {
         logger.info("开始加载网关动态路由...")
-        routeRepository.findAll()
+        Mono.delay(Duration.ofMillis(500))
+            .thenMany(routeRepository.findAll())
             .flatMap { entity ->
                 val definition = gatewayRouteConverter.convert(entity)
                 redisRepository.save(Mono.just(definition))
+            }.doOnComplete {
+                logger.info("网关动态路由加载完成，正在发布刷新事件...")
+                publishAndBroadcastRoutes().subscribe()
             }
-            .doOnComplete { logger.info("网关动态路由加载完成") }
-            .subscribe()
-        publishRoutes().subscribe()
+            .subscribeOn(Schedulers.boundedElastic())
+            .subscribe(
+                {},
+                { error -> logger.error("❌ 动态路由初始化失败", error) } // onError
+            )
     }
 
     fun getAll(): Flux<GatewayRouteDTO> {
@@ -103,7 +108,10 @@ class DynamicRouteService(
                             routeRepository.findById(entity.id)
                                 .flatMap { existing ->
                                     recordHistory(existing.id, "Update Route (Before)", existing)
-                                        .then(routeRepository.save(entity.copy(id = existing.id).apply { markNotNew() }))
+                                        .then(
+                                            routeRepository.save(
+                                                entity.copy(id = existing.id).apply { markNotNew() })
+                                        )
                                         .flatMap { saved ->
                                             recordHistory(saved.id, "Update Route (After)", saved)
                                                 .then(publishAndBroadcastRoutes())
@@ -172,7 +180,11 @@ class DynamicRouteService(
     }
 
     private fun publishAndBroadcastRoutes(): Mono<Void> {
-        return Mono.fromRunnable<Void> { eventPublisher.publishEvent(RefreshRoutesEvent(this)) }
+        return Mono.fromRunnable<Void> {
+            logger.info("📢 正准备发布路由刷新事件 RefreshRoutesEvent...")
+            eventPublisher.publishEvent(RefreshRoutesEvent(this))
+        }
+            .subscribeOn(Schedulers.boundedElastic())
             .then(cacheRefreshPublisher.publishRefresh(ROUTE_REFRESH_TOPIC).then())
     }
 
@@ -184,9 +196,13 @@ class DynamicRouteService(
                 val definition = gatewayRouteConverter.convert(entity)
                 redisRepository.save(Mono.just(definition))
             }
-            .then(Mono.fromRunnable {
-                eventPublisher.publishEvent(RefreshRoutesEvent(this))
-            })
+            .collectList()
+            .flatMap {
+                Mono.fromRunnable<Void> {
+                    logger.info("✅ Redis同步完成，发布 RefreshRoutesEvent")
+                    eventPublisher.publishEvent(RefreshRoutesEvent(this))
+                }.subscribeOn(Schedulers.boundedElastic())
+            }
     }
 
     private fun validateRoute(dto: GatewayRouteDTO) {
@@ -268,7 +284,8 @@ class DynamicRouteService(
                 // 1. 解析原有的 Metadata
                 val currentMeta: MutableMap<String, Any> = try {
                     if (existing.metadata.isNullOrBlank()) mutableMapOf()
-                    else objectMapper.readValue(existing.metadata, object : TypeReference<Map<String, Any>>() {}).toMutableMap()
+                    else objectMapper.readValue(existing.metadata, object : TypeReference<Map<String, Any>>() {})
+                        .toMutableMap()
                 } catch (e: Exception) {
                     logger.error("解析原有路由 Metadata 失败 ID: $id", e)
                     mutableMapOf()
