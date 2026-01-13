@@ -7,8 +7,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: chongci05/platform-gateway
   DEPLOY_PATH: /home/nic0/app/gateway
-  IMAGE_NAME: platform-gateway
 
 jobs:
   build-and-deploy:
