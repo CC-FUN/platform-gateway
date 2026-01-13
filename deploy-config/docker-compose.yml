@@ -75,7 +75,7 @@ services:
       retries: 10
 
   db-migration:
-    image: db-migration:latest
+    image: ghcr.io/chongci05/db-migration:latest
     container_name: db-migration
     environment:
       - LIQUIBASE_COMMAND_URL=jdbc:mysql://mysql:3306/platform_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai
@@ -192,7 +192,7 @@ services:
     container_name: grafana
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9300:3000"
+      - "9300:3000"
     user: "0"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
@@ -208,14 +208,14 @@ services:
   # ==========================================
 
   gateway:
-    image: platform-gateway:latest
+    image: ghcr.io/chongci05/platform-gateway:latest
     container_name: platform-gateway
     volumes:
       - ./logs:/app/logs
     user: root
     restart: always
     ports:
-      - "127.0.0.1:9000:9000"
+      - "9000:9000"
       - "127.0.0.1:9002:9002"
     environment:
       - SPRING_PROFILES_ACTIVE=prod
