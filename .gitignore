@@ -21,7 +21,6 @@ logs/
 # --- 3. Kotlin & Maven 缓存 ---
 .kotlin/
 .incremental/
-# 注意：不建议排除 .mvn/wrapper/maven-wrapper.jar，以便于 CI/CD 环境直接运行 ./mvnw
 
 # --- 4. 容器与数据目录 (防止本地测试数据被上传) ---
 mysql_data/
@@ -37,7 +36,6 @@ grafana_data/
 *.iws
 *.iml
 *.ipr
-out/
 
 # VS Code
 .vscode/
